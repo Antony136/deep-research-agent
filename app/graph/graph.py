@@ -12,18 +12,22 @@ Current workflow:
   Researcher
       |
       v
+Evidence Extractor
+      |
+      v
   More research?
     /       \
   yes       no
    |         |
-   └───┐     v
-       │    END
-       │
-       └── Researcher
+   v         v
+Researcher  END
 """
 
 from langgraph.graph import END, START, StateGraph
 
+from app.graph.nodes.evidence_extractor import (
+    evidence_extractor_node,
+)
 from app.graph.nodes.planner import planner_node
 from app.graph.nodes.researcher import researcher_node
 from app.graph.state import ResearchState
@@ -33,11 +37,13 @@ def should_continue_research(
     state: ResearchState,
 ) -> str:
     """
-    Decide whether another research question remains.
+    Decide whether another planned research question
+    still needs to be investigated.
     """
 
-    if state["current_question_index"] < len(
-        state["research_questions"]
+    if (
+        state["current_question_index"]
+        < len(state["research_questions"])
     ):
         return "research"
 
@@ -54,7 +60,7 @@ def build_research_graph():
     )
 
     # ------------------------------------------------------
-    # Nodes
+    # NODES
     # ------------------------------------------------------
 
     graph.add_node(
@@ -67,8 +73,13 @@ def build_research_graph():
         researcher_node,
     )
 
+    graph.add_node(
+        "evidence_extractor",
+        evidence_extractor_node,
+    )
+
     # ------------------------------------------------------
-    # Initial flow
+    # INITIAL FLOW
     # ------------------------------------------------------
 
     graph.add_edge(
@@ -81,17 +92,28 @@ def build_research_graph():
         "researcher",
     )
 
+    # Research must be analyzed before deciding
+    # whether another research question remains.
+    graph.add_edge(
+        "researcher",
+        "evidence_extractor",
+    )
+
     # ------------------------------------------------------
-    # Research loop
+    # RESEARCH LOOP
     # ------------------------------------------------------
 
     graph.add_conditional_edges(
-        "researcher",
+        "evidence_extractor",
         should_continue_research,
         {
             "research": "researcher",
             "end": END,
         },
     )
+
+    # ------------------------------------------------------
+    # COMPILE
+    # ------------------------------------------------------
 
     return graph.compile()

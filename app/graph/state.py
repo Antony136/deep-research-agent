@@ -20,36 +20,25 @@ class ResearchState(TypedDict):
     Complete state of a research session.
     """
 
-    # --------------------------------------------------------
     # USER REQUEST
-    # --------------------------------------------------------
-
     question: str
 
-    # --------------------------------------------------------
     # RESEARCH PLAN
-    # --------------------------------------------------------
-
     research_questions: list[ResearchQuestion]
 
-    # --------------------------------------------------------
     # RESEARCH DATA
-    # --------------------------------------------------------
-
     sources: list[Source]
+
+    # Sources belonging to the research question
+    # currently being processed.
+    current_sources: list[Source]
 
     evidence: list[Evidence]
 
-    # --------------------------------------------------------
     # WORKFLOW CONTROL
-    # --------------------------------------------------------
-
     current_question_index: int
 
     research_complete: bool
 
-    # --------------------------------------------------------
     # FINAL OUTPUT
-    # --------------------------------------------------------
-
     report: ResearchReport | None
