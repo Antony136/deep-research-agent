@@ -109,7 +109,13 @@ def print_evidence(
         print()
 
         print(
-            f"[{index}] CLAIM"
+            f"[{index}] "
+            f"RESEARCH QUESTION "
+            f"{item.research_question_number}"
+        )
+
+        print(
+            "    CLAIM"
         )
 
         print(
@@ -186,6 +192,7 @@ def print_research_decision(
     else:
 
         for gap in research_gaps:
+
             print(
                 f"  - {gap}"
             )
@@ -198,8 +205,8 @@ def main():
     print_separator()
 
     question = (
-        "Compare LangChain, LangGraph, and CrewAI "
-        "for building production AI agent systems."
+        "How is climate change affecting global coffee production, "
+        "and what strategies are farmers and governments using to adapt?"
     )
 
     print("\nUSER QUESTION")
@@ -216,6 +223,15 @@ def main():
         "research_questions": [],
 
         # --------------------------------------------------
+        # CURRENT RESEARCH QUESTION
+        # --------------------------------------------------
+
+        # The researcher populates these fields when it
+        # begins processing a planned research question.
+        "active_research_question": None,
+        "active_research_question_number": None,
+
+        # --------------------------------------------------
         # RESEARCH DATA
         # --------------------------------------------------
 
@@ -228,7 +244,10 @@ def main():
         # WORKFLOW CONTROL
         # --------------------------------------------------
 
+        # Pointer to the next research question that should
+        # be processed by the researcher.
         "current_question_index": 0,
+
         "research_complete": False,
 
         # --------------------------------------------------

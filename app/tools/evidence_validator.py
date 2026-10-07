@@ -1,33 +1,64 @@
 """
-Deterministic evidence validation for the Deep Research Agent.
+Evidence validation for the Deep Research Agent.
 
-This module checks whether extracted evidence is actually
-grounded in the sources collected by the research system.
+This module validates whether extracted evidence is genuinely
+supported by the collected research sources.
 
-The validator does not use an LLM. It performs deterministic
-checks before evidence is allowed to move further through
-the research pipeline.
+Validation happens in two layers:
 
-The matching logic is intentionally tolerant of common web
-extraction differences such as:
+1. Deterministic grounding
+   - claim exists
+   - source URL exists
+   - cited URL belongs to a collected source
+   - supporting text exists in the cited source
 
-- Unicode punctuation
-- HTML text formatting
-- Different whitespace
-- Line breaks
-- Line-break hyphenation
-- Minor text extraction differences
+2. Semantic alignment
+   - the supporting text must actually support the claim
 
-It still requires strong textual overlap before evidence
-is considered grounded.
+The deterministic checks prevent fabricated source passages.
+
+The semantic check prevents a different but real passage from
+being incorrectly attached to an unrelated claim.
+
+The semantic check uses the local LLM because textual overlap
+alone cannot reliably determine whether a passage actually
+supports a claim.
 """
 
+import os
 import re
 import unicodedata
 from difflib import SequenceMatcher
 
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_ollama import ChatOllama
+from pydantic import BaseModel, Field
+
 from app.schemas.research import Evidence, Source
 
+
+load_dotenv()
+
+
+# -------------------------------------------------------------------
+# LLM CONFIGURATION
+# -------------------------------------------------------------------
+
+MODEL_NAME = os.getenv(
+    "OLLAMA_MODEL",
+    "qwen2.5-coder:7b",
+)
+
+BASE_URL = os.getenv(
+    "OLLAMA_BASE_URL",
+    "http://localhost:11434",
+)
+
+
+# -------------------------------------------------------------------
+# DETERMINISTIC MATCHING CONFIGURATION
+# -------------------------------------------------------------------
 
 # Maximum supporting passage length accepted for fuzzy matching.
 MAX_SUPPORTING_TEXT_LENGTH = 2000
@@ -38,6 +69,130 @@ MIN_FUZZY_SIMILARITY = 0.85
 # Minimum token overlap required by the fuzzy fallback.
 MIN_TOKEN_OVERLAP = 0.80
 
+
+# -------------------------------------------------------------------
+# SEMANTIC VALIDATION CONFIGURATION
+# -------------------------------------------------------------------
+
+class SemanticValidationOutput(BaseModel):
+    """
+    Structured result returned by the semantic evidence validator.
+    """
+
+    supported: bool = Field(
+        description=(
+            "Whether the supporting text directly supports "
+            "the factual claim."
+        ),
+    )
+
+    reason: str = Field(
+        description=(
+            "Brief explanation of why the supporting text "
+            "does or does not support the claim."
+        ),
+    )
+
+
+model = ChatOllama(
+    model=MODEL_NAME,
+    base_url=BASE_URL,
+    temperature=0,
+)
+
+
+structured_model = model.with_structured_output(
+    SemanticValidationOutput
+)
+
+
+semantic_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+You are a strict evidence verification component
+for a deep research system.
+
+Your task is to determine whether a supporting passage
+actually supports a factual claim.
+
+Rules:
+
+1. The claim must be supported by the supplied passage.
+2. The passage must contain enough information to justify
+   the claim.
+3. Do not use outside knowledge.
+4. Do not infer facts that are not reasonably supported
+   by the passage.
+5. If the passage discusses a different company, product,
+   framework, person, topic, or fact, reject the evidence.
+6. If the passage only partially supports a stronger claim,
+   reject it.
+7. If the claim contains multiple factual assertions and
+   the passage supports only some of them, reject it.
+8. Prefer conservative decisions.
+9. A passage being from the correct source is NOT enough.
+10. The passage must actually support the claim.
+
+Examples:
+
+Claim:
+"Framework A supports persistent state."
+
+Passage:
+"Framework A provides checkpointing so workflow state
+can be saved and resumed."
+
+Decision:
+supported = true
+
+Claim:
+"Framework A supports persistent state."
+
+Passage:
+"Framework B provides checkpointing so workflow state
+can be saved and resumed."
+
+Decision:
+supported = false
+
+Claim:
+"Framework A is faster than Framework B."
+
+Passage:
+"Framework A and Framework B are both popular
+frameworks for AI applications."
+
+Decision:
+supported = false
+
+Return only the requested structured output.
+""",
+        ),
+        (
+            "human",
+            """
+CLAIM
+
+{claim}
+
+
+SUPPORTING PASSAGE
+
+{supporting_text}
+""",
+        ),
+    ]
+)
+
+
+semantic_chain = semantic_prompt | structured_model
+
+
+# -------------------------------------------------------------------
+# TEXT NORMALIZATION
+# -------------------------------------------------------------------
 
 def _normalize_text(text: str) -> str:
     """
@@ -106,7 +261,9 @@ def _tokenize(text: str) -> list[str]:
     Convert normalized text into word-like tokens.
     """
 
-    normalized = _normalize_text(text)
+    normalized = _normalize_text(
+        text
+    )
 
     if not normalized:
         return []
@@ -124,6 +281,10 @@ def _url_key(url: str) -> str:
 
     return url.strip().rstrip("/").lower()
 
+
+# -------------------------------------------------------------------
+# DETERMINISTIC SOURCE GROUNDING
+# -------------------------------------------------------------------
 
 def _exact_match(
     supporting_text: str,
@@ -177,7 +338,9 @@ def _token_sequence_match(
     if len(support_tokens) > len(source_tokens):
         return False
 
-    support_length = len(support_tokens)
+    support_length = len(
+        support_tokens
+    )
 
     first_token = support_tokens[0]
 
@@ -390,6 +553,59 @@ def _supporting_text_exists(
     return False
 
 
+# -------------------------------------------------------------------
+# SEMANTIC CLAIM VALIDATION
+# -------------------------------------------------------------------
+
+def _validate_claim_support(
+    claim: str,
+    supporting_text: str,
+) -> tuple[bool, str]:
+    """
+    Determine whether the supporting passage actually
+    supports the claim.
+
+    This is intentionally separate from source grounding.
+
+    Source grounding answers:
+
+        "Did this text actually come from the source?"
+
+    Semantic validation answers:
+
+        "Does this text actually support the claim?"
+    """
+
+    try:
+        result = semantic_chain.invoke(
+            {
+                "claim": claim,
+                "supporting_text": supporting_text,
+            }
+        )
+
+    except Exception as exc:
+        return False, (
+            "Semantic evidence validation failed: "
+            f"{exc}"
+        )
+
+    if not result.supported:
+        return False, (
+            "Supporting text does not adequately "
+            f"support the claim: {result.reason}"
+        )
+
+    return True, (
+        "Claim is semantically supported by "
+        "the supporting text."
+    )
+
+
+# -------------------------------------------------------------------
+# SINGLE EVIDENCE VALIDATION
+# -------------------------------------------------------------------
+
 def validate_evidence(
     evidence: Evidence,
     sources: list[Source],
@@ -404,7 +620,12 @@ def validate_evidence(
     - supporting text exists
     - cited URL belongs to a collected source
     - supporting text can be grounded in that source
+    - supporting text semantically supports the claim
     """
+
+    # ---------------------------------------------------------------
+    # 1. Basic field validation
+    # ---------------------------------------------------------------
 
     if not evidence.claim.strip():
         return False, (
@@ -420,6 +641,10 @@ def validate_evidence(
         return False, (
             "Evidence supporting text is empty."
         )
+
+    # ---------------------------------------------------------------
+    # 2. Verify cited source exists
+    # ---------------------------------------------------------------
 
     evidence_url = _url_key(
         evidence.source_url
@@ -440,6 +665,10 @@ def validate_evidence(
             "that was not collected."
         )
 
+    # ---------------------------------------------------------------
+    # 3. Verify supporting text is actually from source
+    # ---------------------------------------------------------------
+
     if not _supporting_text_exists(
         supporting_text=evidence.supporting_text,
         source_content=source.content,
@@ -449,10 +678,33 @@ def validate_evidence(
             "strongly enough to the cited source."
         )
 
-    return True, (
-        "Evidence is grounded in the cited source."
+    # ---------------------------------------------------------------
+    # 4. Verify claim ↔ supporting text alignment
+    # ---------------------------------------------------------------
+
+    semantically_supported, semantic_reason = (
+        _validate_claim_support(
+            claim=evidence.claim,
+            supporting_text=evidence.supporting_text,
+        )
     )
 
+    if not semantically_supported:
+        return False, semantic_reason
+
+    # ---------------------------------------------------------------
+    # 5. Evidence passed every validation layer
+    # ---------------------------------------------------------------
+
+    return True, (
+        "Evidence is grounded in the cited source "
+        "and semantically supports the claim."
+    )
+
+
+# -------------------------------------------------------------------
+# BATCH VALIDATION
+# -------------------------------------------------------------------
 
 def validate_evidence_batch(
     evidence_items: list[Evidence],
@@ -472,7 +724,8 @@ def validate_evidence_batch(
         )
 
     Rejected evidence includes the original evidence item
-    together with the deterministic rejection reason.
+    together with the deterministic or semantic rejection
+    reason.
     """
 
     valid_evidence = []

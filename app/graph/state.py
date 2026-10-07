@@ -26,6 +26,24 @@ class ResearchState(TypedDict):
     # RESEARCH PLAN
     research_questions: list[ResearchQuestion]
 
+    # CURRENT RESEARCH QUESTION
+    #
+    # current_question_index is the pointer used by the
+    # workflow to determine which question should be
+    # researched next.
+    #
+    # active_research_question is the question whose
+    # sources/evidence are currently being processed.
+    #
+    # These are intentionally separate because the workflow
+    # advances the next-question pointer before later nodes
+    # finish processing the current question.
+    active_research_question: ResearchQuestion | None
+
+    # 1-based number of the research question currently
+    # being processed.
+    active_research_question_number: int | None
+
     # Sources belonging to the research question
     # currently being processed.
     current_sources: list[Source]

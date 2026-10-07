@@ -34,19 +34,29 @@ class Source(BaseModel):
 
     title: str = Field(
         default="",
-        description="Title of the source."
+        description="Title of the source.",
     )
 
     content: str = Field(
         default="",
-        description="Relevant extracted content from the source."
+        description="Relevant extracted content from the source.",
     )
 
 
 class Evidence(BaseModel):
     """
     A piece of evidence extracted from a source.
+
+    Each evidence item is explicitly associated with the
+    research question it was extracted for.
     """
+
+    research_question_number: int = Field(
+        description=(
+            "1-based number of the research question "
+            "this evidence supports."
+        )
+    )
 
     claim: str = Field(
         description="The factual claim supported by the evidence."
@@ -76,10 +86,10 @@ class ResearchReport(BaseModel):
 
     findings: list[str] = Field(
         default_factory=list,
-        description="Important findings from the research."
+        description="Important findings from the research.",
     )
 
     sources: list[str] = Field(
         default_factory=list,
-        description="URLs used to support the report."
+        description="URLs used to support the report.",
     )

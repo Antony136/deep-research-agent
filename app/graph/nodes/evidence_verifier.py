@@ -43,6 +43,16 @@ def evidence_verifier_node(
         f"{len(pending_evidence)}"
     )
 
+    current_question_number = (
+        state["active_research_question_number"]
+    )
+
+    if current_question_number is not None:
+        print(
+            f"  Verifying evidence for research "
+            f"question {current_question_number}."
+        )
+
     valid_evidence, rejected_evidence = (
         validate_evidence_batch(
             evidence_items=pending_evidence,
@@ -61,10 +71,22 @@ def evidence_verifier_node(
     )
 
     for evidence, reason in rejected_evidence:
+
         print()
         print("  REJECTED EVIDENCE")
-        print(f"    Claim: {evidence.claim}")
-        print(f"    Reason: {reason}")
+
+        print(
+            f"    Research question: "
+            f"{evidence.research_question_number}"
+        )
+
+        print(
+            f"    Claim: {evidence.claim}"
+        )
+
+        print(
+            f"    Reason: {reason}"
+        )
 
     existing_evidence = state["evidence"]
 

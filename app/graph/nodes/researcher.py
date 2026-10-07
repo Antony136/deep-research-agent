@@ -37,13 +37,22 @@ def researcher_node(
         return {
             **state,
             "research_complete": True,
+            "active_research_question": None,
+            "active_research_question_number": None,
         }
+
+    # ------------------------------------------------------
+    # Identify the question being processed
+    # ------------------------------------------------------
 
     current_question = questions[current_index]
 
+    # Human-readable 1-based question number.
+    current_question_number = current_index + 1
+
     print(
         f"Research question "
-        f"{current_index + 1}/{len(questions)}:"
+        f"{current_question_number}/{len(questions)}:"
     )
 
     print(
@@ -197,12 +206,25 @@ def researcher_node(
 
     return {
         **state,
+
         "sources": combined_sources,
 
         # These are ONLY the sources belonging to the
-        # research question that was just processed.
+        # research question currently being processed.
         "current_sources": discovered_sources,
 
+        # Explicitly preserve the question whose sources
+        # are currently being processed.
+        "active_research_question": current_question,
+
+        # Evidence extracted from these sources will carry
+        # this same 1-based question number.
+        "active_research_question_number": (
+            current_question_number
+        ),
+
+        # Advance the pointer so the next researcher call
+        # processes the next question.
         "current_question_index": (
             current_index + 1
         ),

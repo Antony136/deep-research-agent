@@ -1,24 +1,30 @@
 """
-Research sufficiency node for the Deep Research Agent.
+Research sufficiency evaluator for the Deep Research Agent.
 
-This node evaluates whether the currently verified evidence is
-sufficient to answer the user's complete research question.
+This node determines whether the collected verified evidence
+is sufficient to answer the planned research questions.
 
-The evaluator considers:
+The evaluator works question-by-question instead of sending
+the entire evidence collection to one large LLM prompt.
 
-- the original user question
-- the complete research plan
-- which planned questions have already been processed
-- the verified evidence collected so far
+Evidence ownership is explicit:
 
-If the research is insufficient, the evaluator identifies
-specific factual gaps that can later be handled by the
-adaptive planner.
+    Research Question
+          ↓
+    research_question_number
+          ↓
+    Owned verified evidence
+          ↓
+    Relevance filtering
+          ↓
+    LLM coverage evaluation
 
-The evaluator does not perform web searches.
+Evidence numbering is GLOBAL and remains stable across the
+entire research session.
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
@@ -26,6 +32,7 @@ from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 
 from app.graph.state import ResearchState
+from app.schemas.research import Evidence, ResearchQuestion
 
 
 load_dotenv()
@@ -42,6 +49,46 @@ BASE_URL = os.getenv(
 )
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
+MAX_EVIDENCE_PER_QUESTION = 8
+MIN_TOKEN_OVERLAP = 0.08
+
+
+# ------------------------------------------------------------
+# Structured output
+# ------------------------------------------------------------
+
+
+class CoverageAssessment(BaseModel):
+    """
+    Evidence mapping for one research question.
+    """
+
+    evidence_numbers: list[int] = Field(
+        default_factory=list,
+        description=(
+            "GLOBAL 1-based numbers of verified evidence "
+            "items that directly support this research "
+            "question."
+        ),
+    )
+
+    missing_information: str = Field(
+        default="",
+        description=(
+            "Specific information still required to answer "
+            "the research question."
+        ),
+    )
+
+
+# ------------------------------------------------------------
+# Model
+# ------------------------------------------------------------
+
 model = ChatOllama(
     model=MODEL_NAME,
     base_url=BASE_URL,
@@ -49,39 +96,14 @@ model = ChatOllama(
 )
 
 
-class ResearchSufficiencyOutput(BaseModel):
-    """
-    Structured decision returned by the sufficiency evaluator.
-    """
-
-    sufficient: bool = Field(
-        description=(
-            "Whether the verified evidence is sufficient "
-            "to answer the complete main research question."
-        )
-    )
-
-    reason: str = Field(
-        description=(
-            "A concise explanation of the overall evidence "
-            "coverage and any important gaps."
-        )
-    )
-
-    missing_information: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Specific factual research gaps that must be "
-            "addressed before the main question can be "
-            "answered reliably. Return an empty list only "
-            "when the research is genuinely sufficient."
-        ),
-    )
-
-
 structured_model = model.with_structured_output(
-    ResearchSufficiencyOutput
+    CoverageAssessment
 )
+
+
+# ------------------------------------------------------------
+# Prompt
+# ------------------------------------------------------------
 
 
 prompt = ChatPromptTemplate.from_messages(
@@ -89,204 +111,61 @@ prompt = ChatPromptTemplate.from_messages(
         (
             "system",
             """
-You are the research sufficiency evaluator in a deep
+You are the evidence coverage evaluator of a deep
 research agent.
 
-Your task is to determine whether the VERIFIED evidence
-collected so far is sufficient to answer the user's COMPLETE
-research question reliably.
+Your task is to determine which VERIFIED EVIDENCE items
+directly support ONE research question.
 
-You must evaluate the research as a whole.
+You are NOT answering the question.
 
-The original user question is the primary authority.
-
-The research plan is supporting context only. It describes
-possible investigations, but it does NOT define what must
-automatically be researched.
+Use ONLY the supplied evidence.
 
 IMPORTANT RULES:
 
-1. Use ONLY the supplied verified evidence.
+1. Only select evidence that directly helps answer the
+   research question.
 
-2. Do NOT use your general knowledge.
+2. Do NOT select evidence merely because it mentions the
+   same company, framework, or general topic.
 
-3. Do NOT invent facts.
+3. Read both the CLAIM and SUPPORTING TEXT.
 
-4. Do NOT treat raw sources as evidence unless the relevant
-   information appears in the verified evidence.
+4. The evidence number is a GLOBAL evidence number.
+   Preserve the exact numbers supplied in the input.
 
-5. Do NOT consider rejected evidence.
+5. Do not invent evidence numbers.
 
-6. Determine what the original user question actually requires
-   before judging whether the research is sufficient.
+6. Do not modify evidence numbers.
 
-7. Evaluate whether the verified evidence covers those
-   requirements.
+7. An evidence item can be selected only when its actual
+   content contributes useful information to the question.
 
-8. Do NOT assume that every research-plan question must be
-   answered.
+8. For strengths/weaknesses questions, select evidence
+   describing actual strengths, limitations, tradeoffs,
+   adoption concerns, reliability concerns, or similar
+   characteristics.
 
-9. A research-plan question may be unnecessary if the verified
-   evidence already provides the information needed to answer
-   the original question.
+9. For comparison questions, select evidence containing
+   actual differences, capabilities, architecture,
+   workflow, or tradeoffs between the relevant systems.
 
-10. Do NOT create new requirements merely because a research
-    dimension sounds useful or interesting.
+10. For real-world/case-study questions, select evidence
+    describing actual deployments, customers, applications,
+    use cases, or case studies.
 
-11. Missing information must be directly relevant to the
-    original user question.
+11. If the available evidence does not adequately answer
+    the question, return an empty evidence_numbers list.
 
-12. Prefer a small number of important evidence gaps over a
-    large list of speculative gaps.
+12. When evidence_numbers is empty, explain specifically
+    what information is still missing.
 
-13. If the available evidence is sufficient to produce a
-    reliable answer, return sufficient=true even if some
-    potentially interesting information has not been researched.
+13. Do NOT use outside knowledge.
 
-14. If an important part of the original question cannot be
-    answered reliably from the verified evidence, return
-    sufficient=false.
+14. Do NOT infer facts that are not supported by the
+    supplied evidence.
 
-REASONING PROCESS:
-
-First determine the information requirements implied by the
-original user question.
-
-For example, a comparison question may require:
-
-- coverage of the major entities being compared
-- coverage of the dimensions explicitly requested
-- evidence describing meaningful differences
-- evidence supporting important tradeoffs
-
-A recommendation question may require:
-
-- evidence about the available options
-- evidence about the criteria relevant to the recommendation
-- enough information to distinguish the options
-
-A factual question may require:
-
-- evidence directly supporting the requested fact
-- enough supporting context to avoid an unreliable conclusion
-
-These are GENERAL STRUCTURAL PATTERNS.
-
-Do not assume that every question has these exact dimensions.
-
-Determine the appropriate requirements from the actual user
-question.
-
-EVIDENCE COVERAGE:
-
-For each important requirement implied by the original question,
-ask:
-
-1. Is there verified evidence addressing this requirement?
-2. Is the evidence sufficiently specific?
-3. Is the evidence directly relevant?
-4. Can the requirement be answered without unsupported
-   assumptions?
-
-If an important requirement is unsupported, research is
-insufficient.
-
-If all important requirements are adequately supported,
-research is sufficient.
-
-RESEARCH PLAN:
-
-Use the research plan to understand what has already been
-investigated and what may still be available.
-
-However:
-
-- Do NOT require every planned question to be processed.
-- Do NOT assume an unprocessed question represents a missing
-  requirement.
-- Do NOT create a missing-information item merely because a
-  planned question has not been processed.
-- Only treat an unprocessed question as important when the
-  original user question genuinely requires the information
-  that question would provide.
-
-RESEARCH PROGRESS:
-
-The current research progress indicates how much of the plan
-has been processed.
-
-Progress alone must never determine sufficiency.
-
-For example:
-
-- A partially processed plan can be sufficient if the evidence
-  already answers the original question.
-- A fully processed plan can still be insufficient if important
-  requirements remain unsupported.
-
-MISSING INFORMATION:
-
-When research is insufficient, describe WHAT important factual
-information is missing.
-
-Each missing-information item must:
-
-- be directly connected to the original user question
-- describe a factual information gap
-- be specific enough for another planner to create a useful
-  research question
-- avoid prescribing the search method
-
-Good structural forms:
-
-- "Evidence about [specific missing capability]"
-- "Comparison of [entity A] and [entity B] on [specific dimension]"
-- "Real-world evidence about [specific aspect]"
-- "Evidence needed to determine [specific tradeoff]"
-
-These are structural examples only.
-
-Do NOT copy their subjects into the current answer unless the
-original question requires them.
-
-Bad forms:
-
-- "Need more research"
-- "Search the internet"
-- "Find better sources"
-- "Research question 4"
-- "Get more information"
-
-Do not identify a gap merely because additional information
-could be interesting.
-
-SUFFICIENCY:
-
-Return sufficient=true ONLY when the verified evidence provides
-enough reliable coverage to answer the COMPLETE original user
-question.
-
-Return sufficient=false when one or more important requirements
-of the original question remain unsupported.
-
-If sufficient=true:
-
-- missing_information MUST be an empty list
-- reason must briefly explain why the important requirements
-  are adequately covered
-
-If sufficient=false:
-
-- missing_information MUST contain only the important remaining
-  factual gaps
-- reason must explain why those gaps prevent a reliable answer
-
-IMPORTANT:
-
-Do not optimize for exhaustive research.
-
-Optimize for sufficient evidence to answer the original
-question reliably.
+15. Prefer direct evidence over indirect evidence.
 
 Return only the requested structured output.
 """,
@@ -299,19 +178,18 @@ ORIGINAL USER QUESTION:
 {question}
 
 
-RESEARCH PLAN:
+RESEARCH QUESTION:
 
-{research_plan}
-
-
-RESEARCH PROGRESS:
-
-{research_progress}
+{research_question}
 
 
-VERIFIED EVIDENCE:
+VERIFIED EVIDENCE CANDIDATES:
 
 {evidence}
+
+
+Determine which GLOBAL evidence numbers directly support
+this research question.
 """,
         ),
     ]
@@ -321,119 +199,163 @@ VERIFIED EVIDENCE:
 chain = prompt | structured_model
 
 
-def _format_research_plan(
-    state: ResearchState,
-) -> str:
+# ------------------------------------------------------------
+# Text helpers
+# ------------------------------------------------------------
+
+
+def _tokenize(text: str) -> set[str]:
     """
-    Format the complete research plan and indicate which
-    questions have already been processed.
+    Convert text into a lightweight set of lowercase tokens.
     """
 
-    questions = state[
-        "research_questions"
-    ]
-
-    current_index = state[
-        "current_question_index"
-    ]
-
-    if not questions:
-        return "No research plan has been created."
-
-    sections = []
-
-    for index, question in enumerate(
-        questions,
-        start=1,
-    ):
-        if index <= current_index:
-            status = "PROCESSED"
-        else:
-            status = "NOT YET PROCESSED"
-
-        sections.append(
-            f"""
-QUESTION {index}
-STATUS: {status}
-
-Research question:
-{question.question}
-
-Search queries:
-{", ".join(question.search_queries)}
-""".strip()
+    return {
+        token
+        for token in re.findall(
+            r"[a-zA-Z0-9]+",
+            text.lower(),
         )
-
-    return "\n\n".join(
-        sections
-    )
+        if len(token) > 2
+    }
 
 
-def _format_research_progress(
-    state: ResearchState,
-) -> str:
+def _question_tokens(
+    question: ResearchQuestion,
+) -> set[str]:
     """
-    Provide explicit progress information to the evaluator.
-    """
-
-    questions = state[
-        "research_questions"
-    ]
-
-    current_index = state[
-        "current_question_index"
-    ]
-
-    processed = min(
-        current_index,
-        len(questions),
-    )
-
-    remaining = max(
-        len(questions) - processed,
-        0,
-    )
-
-    return (
-        f"Research round: "
-        f"{state['research_round']}\n"
-        f"Questions processed: "
-        f"{processed}/{len(questions)}\n"
-        f"Questions remaining: "
-        f"{remaining}"
-    )
-
-
-def _format_evidence(
-    state: ResearchState,
-) -> str:
-    """
-    Format trusted evidence for the sufficiency evaluator.
+    Build tokens from the research question and its search
+    queries.
     """
 
-    evidence = state[
-        "evidence"
-    ]
+    text = " ".join(
+        [
+            question.question,
+            *question.search_queries,
+        ]
+    )
 
-    if not evidence:
-        return (
-            "No verified evidence has been collected."
-        )
+    return _tokenize(text)
 
-    sections = []
+
+def _evidence_relevance_score(
+    question_tokens: set[str],
+    evidence: Evidence,
+) -> float:
+    """
+    Calculate lightweight lexical relevance.
+
+    This is NOT the final coverage decision.
+
+    It only reduces the amount of evidence sent to the LLM.
+    """
+
+    evidence_tokens = _tokenize(
+        f"{evidence.claim} {evidence.supporting_text}"
+    )
+
+    if not question_tokens or not evidence_tokens:
+        return 0.0
+
+    overlap = (
+        len(question_tokens & evidence_tokens)
+        / len(question_tokens)
+    )
+
+    return overlap
+
+
+def _select_candidate_evidence(
+    question: ResearchQuestion,
+    evidence: list[Evidence],
+) -> list[tuple[int, Evidence]]:
+    """
+    Select a small set of potentially relevant evidence items.
+
+    The evidence passed into this function MUST already belong
+    to the current research question.
+
+    Evidence numbers remain GLOBAL.
+
+    Returns:
+
+        [
+            (1, Evidence(...)),
+            (7, Evidence(...)),
+            ...
+        ]
+    """
+
+    question_tokens = _question_tokens(question)
+
+    scored = []
 
     for index, item in enumerate(
         evidence,
         start=1,
     ):
+
+        score = _evidence_relevance_score(
+            question_tokens=question_tokens,
+            evidence=item,
+        )
+
+        if score >= MIN_TOKEN_OVERLAP:
+
+            scored.append(
+                (
+                    score,
+                    index,
+                    item,
+                )
+            )
+
+    scored.sort(
+        key=lambda value: (
+            -value[0],
+            value[1],
+        )
+    )
+
+    selected = scored[
+        :MAX_EVIDENCE_PER_QUESTION
+    ]
+
+    return [
+        (
+            index,
+            item,
+        )
+        for _, index, item in selected
+    ]
+
+
+# ------------------------------------------------------------
+# Formatting
+# ------------------------------------------------------------
+
+
+def _format_evidence(
+    evidence: list[tuple[int, Evidence]],
+) -> str:
+    """
+    Format candidate evidence while preserving GLOBAL IDs.
+    """
+
+    if not evidence:
+        return "No relevant verified evidence candidates."
+
+    sections = []
+
+    for number, item in evidence:
+
         sections.append(
             f"""
-EVIDENCE {index}
+GLOBAL EVIDENCE {number}
 
 Claim:
 {item.claim}
 
-Source URL:
+Source:
 {item.source_url}
 
 Supporting text:
@@ -441,79 +363,144 @@ Supporting text:
 """.strip()
         )
 
-    return "\n\n".join(
-        sections
+    return "\n\n".join(sections)
+
+
+# ------------------------------------------------------------
+# Normalization
+# ------------------------------------------------------------
+
+
+def _normalize_evidence_numbers(
+    numbers: list[int],
+    candidate_numbers: set[int],
+) -> list[int]:
+    """
+    Keep only valid GLOBAL evidence numbers that were actually
+    supplied to the LLM.
+    """
+
+    normalized = []
+
+    for number in numbers:
+
+        if (
+            number in candidate_numbers
+            and number not in normalized
+        ):
+            normalized.append(number)
+
+    return normalized
+
+
+# ------------------------------------------------------------
+# Single-question evaluation
+# ------------------------------------------------------------
+
+
+def _evaluate_question(
+    original_question: str,
+    research_question: ResearchQuestion,
+    evidence: list[Evidence],
+    global_evidence_numbers: list[int],
+) -> CoverageAssessment:
+    """
+    Evaluate one research question using only evidence that
+    belongs to that research question.
+
+    global_evidence_numbers contains the GLOBAL numbers
+    corresponding to the supplied evidence list.
+    """
+
+    # --------------------------------------------------------
+    # Local candidate selection
+    # --------------------------------------------------------
+
+    question_tokens = _question_tokens(
+        research_question
     )
 
+    scored = []
 
-def research_sufficiency_node(
-    state: ResearchState,
-) -> ResearchState:
-    """
-    Evaluate whether the current verified evidence is
-    sufficient to answer the complete main question.
-    """
+    for global_number, item in zip(
+        global_evidence_numbers,
+        evidence,
+    ):
 
-    print(
-        "\n[Node] research_sufficiency"
+        score = _evidence_relevance_score(
+            question_tokens=question_tokens,
+            evidence=item,
+        )
+
+        if score >= MIN_TOKEN_OVERLAP:
+
+            scored.append(
+                (
+                    score,
+                    global_number,
+                    item,
+                )
+            )
+
+    scored.sort(
+        key=lambda value: (
+            -value[0],
+            value[1],
+        )
     )
 
-    evidence = state[
-        "evidence"
+    selected = scored[
+        :MAX_EVIDENCE_PER_QUESTION
+    ]
+
+    candidates = [
+        (
+            global_number,
+            item,
+        )
+        for _, global_number, item in selected
     ]
 
     print(
-        "  Verified evidence available: "
+        f"\n  Evaluating:"
+        f" {research_question.question}"
+    )
+
+    print(
+        f"  Owned verified evidence: "
         f"{len(evidence)}"
     )
 
     print(
-        "  Research progress: "
-        f"{state['current_question_index']}/"
-        f"{len(state['research_questions'])}"
+        f"  Candidate evidence: "
+        f"{len(candidates)}"
     )
 
-    if not evidence:
+    if not candidates:
 
-        print(
-            "  No verified evidence available. "
-            "Research is insufficient."
+        return CoverageAssessment(
+            evidence_numbers=[],
+            missing_information=(
+                "No relevant verified evidence was "
+                "found for this research requirement."
+            ),
         )
 
-        return {
-            **state,
-            "research_sufficient": False,
-            "research_decision_reason": (
-                "No verified evidence has been "
-                "collected for the research objective."
-            ),
-            "research_gaps": [
-                "Reliable evidence covering the "
-                "main research question"
-            ],
-        }
+    candidate_numbers = {
+        number
+        for number, _ in candidates
+    }
 
     try:
 
         response = chain.invoke(
             {
-                "question": state[
-                    "question"
-                ],
-                "research_plan": (
-                    _format_research_plan(
-                        state
-                    )
+                "question": original_question,
+                "research_question": (
+                    research_question.question
                 ),
-                "research_progress": (
-                    _format_research_progress(
-                        state
-                    )
-                ),
-                "evidence": (
-                    _format_evidence(
-                        state
-                    )
+                "evidence": _format_evidence(
+                    candidates
                 ),
             }
         )
@@ -521,65 +508,315 @@ def research_sufficiency_node(
     except Exception as exc:
 
         print(
-            "  Sufficiency evaluation failed:"
+            "  Coverage evaluation failed:"
         )
 
         print(
             f"  {exc}"
         )
 
+        return CoverageAssessment(
+            evidence_numbers=[],
+            missing_information=(
+                "Coverage evaluation failed; "
+                "additional verification is required."
+            ),
+        )
+
+    valid_numbers = _normalize_evidence_numbers(
+        numbers=response.evidence_numbers,
+        candidate_numbers=candidate_numbers,
+    )
+
+    if not valid_numbers:
+
+        missing_information = (
+            response.missing_information.strip()
+        )
+
+        if not missing_information:
+
+            missing_information = (
+                "The available verified evidence does "
+                "not directly answer this requirement."
+            )
+
+        return CoverageAssessment(
+            evidence_numbers=[],
+            missing_information=missing_information,
+        )
+
+    return CoverageAssessment(
+        evidence_numbers=valid_numbers,
+        missing_information="",
+    )
+
+
+# ------------------------------------------------------------
+# Main node
+# ------------------------------------------------------------
+
+
+def research_sufficiency_node(
+    state: ResearchState,
+) -> ResearchState:
+
+    print("\n[Node] research_sufficiency")
+
+    research_questions = state[
+        "research_questions"
+    ]
+
+    evidence = state[
+        "evidence"
+    ]
+
+    print(
+        "  Planned research questions: "
+        f"{len(research_questions)}"
+    )
+
+    print(
+        "  Verified evidence available: "
+        f"{len(evidence)}"
+    )
+
+    if not research_questions:
+
+        print(
+            "  No research questions available."
+        )
+
         return {
             **state,
             "research_sufficient": False,
-            "research_decision_reason": (
-                "Sufficiency evaluation failed; "
-                "additional research is safer."
-            ),
             "research_gaps": [
-                "Reliable evidence coverage "
-                "could not be evaluated."
+                "No research plan was generated."
             ],
+            "research_decision_reason": (
+                "Research sufficiency cannot be evaluated "
+                "without a research plan."
+            ),
         }
 
-    print(
-        "  Research sufficient: "
-        f"{response.sufficient}"
-    )
-
-    print(
-        "  Reason:"
-    )
-
-    print(
-        f"    {response.reason}"
-    )
-
-    if response.missing_information:
+    if not evidence:
 
         print(
-            "  Missing information:"
+            "  No verified evidence available."
         )
 
-        for gap in response.missing_information:
+        gaps = [
+            question.question
+            for question in research_questions
+        ]
+
+        return {
+            **state,
+            "research_sufficient": False,
+            "research_gaps": gaps,
+            "research_decision_reason": (
+                "No verified evidence has been collected "
+                "for the research objective."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Evaluate each research question independently
+    # --------------------------------------------------------
+
+    assessments = []
+
+    for index, research_question in enumerate(
+        research_questions,
+        start=1,
+    ):
+
+        print(
+            f"\n  Research requirement "
+            f"{index}/{len(research_questions)}"
+        )
+
+        # ----------------------------------------------------
+        # CRITICAL OWNERSHIP FILTER
+        #
+        # Only evidence explicitly produced for this
+        # research question is allowed to participate in
+        # its coverage evaluation.
+        # ----------------------------------------------------
+
+        owned_evidence_with_numbers = [
+            (
+                global_number,
+                item,
+            )
+            for global_number, item in enumerate(
+                evidence,
+                start=1,
+            )
+            if (
+                item.research_question_number
+                == index
+            )
+        ]
+
+        owned_global_numbers = [
+            global_number
+            for global_number, _ in
+            owned_evidence_with_numbers
+        ]
+
+        owned_evidence = [
+            item
+            for _, item in
+            owned_evidence_with_numbers
+        ]
+
+        print(
+            "  Evidence belonging to this question: "
+            f"{len(owned_evidence)}"
+        )
+
+        assessment = _evaluate_question(
+            original_question=state["question"],
+            research_question=research_question,
+            evidence=owned_evidence,
+            global_evidence_numbers=owned_global_numbers,
+        )
+
+        assessments.append(
+            (
+                index,
+                assessment,
+            )
+        )
+
+    # --------------------------------------------------------
+    # Build research gaps
+    # --------------------------------------------------------
+
+    research_gaps = []
+
+    for index, assessment in assessments:
+
+        if assessment.evidence_numbers:
+            continue
+
+        question = research_questions[
+            index - 1
+        ]
+
+        missing_information = (
+            assessment.missing_information.strip()
+        )
+
+        if not missing_information:
+
+            missing_information = (
+                "Additional verified evidence is required "
+                f"to answer: {question.question}"
+            )
+
+        gap = (
+            f"{question.question} "
+            f"— missing: "
+            f"{missing_information}"
+        )
+
+        if gap not in research_gaps:
+
+            research_gaps.append(
+                gap
+            )
+
+    research_sufficient = not research_gaps
+
+    # --------------------------------------------------------
+    # Explanation
+    # --------------------------------------------------------
+
+    if research_sufficient:
+
+        reason = (
+            "Every planned research requirement has "
+            "verified evidence directly mapped to it."
+        )
+
+    else:
+
+        uncovered_count = len(
+            research_gaps
+        )
+
+        reason = (
+            f"{uncovered_count} research requirement(s) "
+            "still lack directly mapped verified evidence."
+        )
+
+    # --------------------------------------------------------
+    # Logging
+    # --------------------------------------------------------
+
+    print(
+        "\n  Research sufficiency: "
+        f"{research_sufficient}"
+    )
+
+    print(
+        "  Coverage assessment:"
+    )
+
+    for index, assessment in assessments:
+
+        status = (
+            "COVERED"
+            if assessment.evidence_numbers
+            else "NOT COVERED"
+        )
+
+        print(
+            f"    [{index}] "
+            f"{status}"
+        )
+
+        if assessment.evidence_numbers:
+
+            print(
+                "        Evidence: "
+                + ", ".join(
+                    str(number)
+                    for number
+                    in assessment.evidence_numbers
+                )
+            )
+
+        else:
+
+            print(
+                "        Missing: "
+                f"{assessment.missing_information}"
+            )
+
+    print(
+        "  Research gaps:"
+    )
+
+    if not research_gaps:
+
+        print(
+            "    None"
+        )
+
+    else:
+
+        for gap in research_gaps:
+
             print(
                 f"    - {gap}"
             )
 
-    else:
-
-        print(
-            "  Missing information: none"
-        )
-
     return {
         **state,
-        "research_sufficient": (
-            response.sufficient
-        ),
-        "research_decision_reason": (
-            response.reason
-        ),
-        "research_gaps": (
-            response.missing_information
-        ),
+        "research_sufficient": research_sufficient,
+        "research_gaps": research_gaps,
+        "research_decision_reason": reason,
     }

@@ -1,17 +1,26 @@
 """
 Evidence extraction node for the Deep Research Agent.
 
-The extractor identifies multiple factual claims from the
-currently researched sources.
+The extractor identifies factual claims from focused source
+passages for the current research question.
 
-The LLM is responsible only for identifying:
-    - the claim
-    - the source containing the claim
+The implementation is intentionally source-first:
 
-Supporting text is always selected deterministically from
-the actual source content.
+    Source
+      ↓
+    Focused passages
+      ↓
+    Small LLM batches
+      ↓
+    Claim + passage_id
+      ↓
+    Deterministic grounding
+      ↓
+    Evidence
 
-This prevents the LLM from inventing or rewriting evidence.
+The LLM is never allowed to invent the supporting text.
+Supporting text is always copied directly from the selected
+source passage.
 """
 
 import os
@@ -24,11 +33,14 @@ from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 
 from app.graph.state import ResearchState
-from app.schemas.research import Evidence
+from app.schemas.research import Evidence, Source
 
+
+# ----------------------------------------------------------
+# Configuration
+# ----------------------------------------------------------
 
 load_dotenv()
-
 
 MODEL_NAME = os.getenv(
     "OLLAMA_MODEL",
@@ -40,8 +52,134 @@ BASE_URL = os.getenv(
     "http://localhost:11434",
 )
 
-MAX_EVIDENCE_ITEMS = 5
+# Maximum number of passages considered from one source.
+MAX_PASSAGES_PER_SOURCE = 3
 
+# Maximum total focused passages considered for one
+# research question.
+MAX_FOCUSED_PASSAGES = 12
+
+# Number of passages sent to Qwen in one extraction call.
+#
+# Keeping this small is important when running Qwen 7B
+# locally on limited VRAM.
+PASSAGES_PER_LLM_BATCH = 6
+
+# Maximum length of an individual passage sent to Qwen.
+MAX_PASSAGE_LENGTH = 1200
+
+# Maximum number of evidence items accepted from one
+# LLM batch.
+MAX_EVIDENCE_PER_BATCH = 3
+
+# Maximum trusted evidence proposals produced for the
+# current research question.
+MAX_EVIDENCE_PER_QUESTION = 5
+
+# Minimum lexical overlap required before semantic
+# verification.
+MIN_TOKEN_OVERLAP = 0.20
+
+# Minimum fuzzy similarity required when lexical overlap
+# is weak but the claim is otherwise a close restatement.
+MIN_FUZZY_SIMILARITY = 0.45
+
+
+# ----------------------------------------------------------
+# Stop words
+# ----------------------------------------------------------
+
+STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "being",
+    "by",
+    "for",
+    "from",
+    "has",
+    "have",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "was",
+    "were",
+    "with",
+    "which",
+    "what",
+    "how",
+    "why",
+    "than",
+    "they",
+    "these",
+    "those",
+    "using",
+    "used",
+    "use",
+}
+
+
+# ----------------------------------------------------------
+# LLM schema
+# ----------------------------------------------------------
+
+
+class ExtractedEvidence(BaseModel):
+    """
+    LLM-selected evidence.
+
+    The model identifies a claim and the exact passage
+    that supports it. The Python code later copies the
+    actual passage text from the source.
+    """
+
+    claim: str = Field(
+        description=(
+            "A concise factual claim directly supported "
+            "by exactly one supplied passage."
+        )
+    )
+
+    passage_id: int = Field(
+        description=(
+            "The numeric ID of the single passage that "
+            "directly supports the claim."
+        )
+    )
+
+
+class EvidenceExtractionOutput(BaseModel):
+    """
+    Structured output returned by one LLM batch.
+    """
+
+    evidence: list[ExtractedEvidence] = Field(
+        default_factory=list,
+        description=(
+            "Evidence claims directly supported by the "
+            "supplied passages."
+        ),
+    )
+
+
+# ----------------------------------------------------------
+# Model
+# ----------------------------------------------------------
 
 model = ChatOllama(
     model=MODEL_NAME,
@@ -49,50 +187,14 @@ model = ChatOllama(
     temperature=0,
 )
 
-
-class ExtractedEvidence(BaseModel):
-    """
-    LLM-selected evidence claim.
-
-    The LLM identifies the factual claim and the source
-    containing it.
-
-    It does NOT generate supporting text.
-    """
-
-    claim: str = Field(
-        description=(
-            "A specific factual claim directly supported "
-            "by one of the supplied sources."
-        )
-    )
-
-    source_index: int = Field(
-        description=(
-            "The numeric index of the source containing "
-            "direct support for the claim."
-        )
-    )
-
-
-class EvidenceExtractionOutput(BaseModel):
-    """
-    Structured output returned by the LLM.
-    """
-
-    evidence: list[ExtractedEvidence] = Field(
-        default_factory=list,
-        description=(
-            "Independent factual claims supported by the "
-            "supplied sources."
-        ),
-    )
-
-
 structured_model = model.with_structured_output(
     EvidenceExtractionOutput
 )
 
+
+# ----------------------------------------------------------
+# Prompt
+# ----------------------------------------------------------
 
 prompt = ChatPromptTemplate.from_messages(
     [
@@ -102,83 +204,33 @@ prompt = ChatPromptTemplate.from_messages(
 You are the evidence extraction component of a deep
 research agent.
 
-Your task is to identify factual claims from the supplied
-sources that help answer the research question.
+Your task is to extract factual claims from the supplied
+source passages that directly help answer the research
+question.
 
-IMPORTANT RULES:
+STRICT GROUNDING RULES:
 
-1. Use ONLY information explicitly supported by the
-   supplied sources.
+1. Use ONLY the supplied passages.
+2. Every claim must be directly supported by ONE passage.
+3. Do not combine information from multiple passages.
+4. Do not use outside knowledge.
+5. Do not infer facts that are not explicitly supported.
+6. Do not make the claim broader than the passage.
+7. Do not add conclusions, comparisons, opinions, or
+   implications unless the passage explicitly states them.
+8. Use the passage_id of the passage that supports the claim.
+9. Prefer precise factual claims over vague summaries.
+10. If a passage does not contain useful evidence, ignore it.
+11. Return at most 3 useful evidence items.
+12. A claim may be a concise paraphrase of the passage.
+13. Preserve important qualifiers such as "can", "may",
+    "supports", "designed for", "according to", or
+    other limitations expressed by the source.
 
-2. Do NOT use your general knowledge.
+IMPORTANT:
 
-3. Do NOT invent facts.
-
-4. Do NOT combine information from different sources into
-   one claim.
-
-5. Each claim must be independently supported by exactly
-   one source.
-
-6. Return the source index that directly supports each claim.
-
-7. Claims should be specific and factual.
-
-8. Prefer useful information about:
-   - capabilities
-   - architecture
-   - production characteristics
-   - scalability
-   - persistence
-   - state management
-   - reliability
-   - deployment
-   - real-world usage
-   - limitations
-   - tradeoffs
-
-9. Avoid vague claims such as:
-   - "This framework is useful."
-   - "It has many features."
-   - "It is good for production."
-
-10. Avoid opinions unless the source explicitly presents
-    them as findings, limitations, or documented tradeoffs.
-
-11. Do not generate supporting quotations.
-
-12. The application will independently extract the exact
-    supporting passage from the source.
-
-13. Extract multiple independent claims when the sources
-    contain multiple useful facts.
-
-14. Do not create multiple claims that express essentially
-    the same fact.
-
-15. Prefer high-value claims over minor implementation
-    details.
-
-16. Return up to 5 strong evidence items.
-
-17. If the sources do not contain useful evidence, return
-    an empty list.
-
-SOURCE INDEXING:
-
-Sources are numbered starting from 1.
-
-For example:
-
-SOURCE 1
-...
-
-SOURCE 2
-...
-
-If a claim is supported by SOURCE 2, return:
-
-source_index = 2
+The Python system will copy the actual supporting passage
+itself. You must NOT invent or reproduce supporting text.
 
 Return only the requested structured output.
 """,
@@ -190,9 +242,9 @@ Research question:
 
 {research_question}
 
-Sources:
+SOURCE PASSAGES:
 
-{sources}
+{passages}
 """,
         ),
     ]
@@ -202,104 +254,138 @@ Sources:
 chain = prompt | structured_model
 
 
-def _format_sources(sources) -> str:
-    """
-    Format sources for the LLM with stable numeric indexes.
-    """
-
-    if not sources:
-        return "No sources available."
-
-    sections = []
-
-    for index, source in enumerate(sources, start=1):
-        sections.append(
-            f"""
-SOURCE {index}
-
-Title:
-{source.title}
-
-URL:
-{source.url}
-
-Content:
-{source.content}
-""".strip()
-        )
-
-    return "\n\n".join(sections)
+# ----------------------------------------------------------
+# Text normalization
+# ----------------------------------------------------------
 
 
 def _normalize_text(text: str) -> str:
     """
-    Normalize text for deterministic matching.
+    Normalize text for comparison.
     """
 
     text = text.lower()
 
-    text = text.replace("\u00ad", "")
-
-    text = text.replace("–", "-")
-    text = text.replace("—", "-")
-    text = text.replace("−", "-")
-
-    text = re.sub(
-        r"-\s*\n\s*",
-        "",
-        text,
-    )
-
     text = re.sub(
         r"\s+",
         " ",
         text,
     )
 
-    text = re.sub(
-        r"[^\w\s%$.-]",
-        " ",
-        text,
+    return text.strip()
+
+
+def _tokens(text: str) -> set[str]:
+    """
+    Extract meaningful normalized tokens.
+    """
+
+    words = re.findall(
+        r"[a-zA-Z0-9]+",
+        text.lower(),
     )
 
-    return re.sub(
-        r"\s+",
-        " ",
-        text,
-    ).strip()
+    return {
+        word
+        for word in words
+        if word not in STOP_WORDS
+        and len(word) > 2
+    }
 
 
-def _tokenize(text: str) -> list[str]:
+def _token_overlap(
+    claim: str,
+    passage: str,
+) -> float:
     """
-    Convert text into normalized tokens.
+    Calculate the proportion of claim tokens that occur
+    in the supporting passage.
+
+    This is intentionally directional:
+
+        claim tokens ∩ passage tokens
+        ------------------------------
+              claim tokens
+
+    This helps prevent the model from adding new factual
+    concepts that are not present in the source.
     """
 
-    normalized = _normalize_text(text)
+    claim_tokens = _tokens(claim)
 
-    return normalized.split()
+    if not claim_tokens:
+        return 0.0
+
+    passage_tokens = _tokens(passage)
+
+    overlap = claim_tokens.intersection(
+        passage_tokens
+    )
+
+    return len(overlap) / len(claim_tokens)
+
+
+def _fuzzy_similarity(
+    claim: str,
+    passage: str,
+) -> float:
+    """
+    Calculate a lightweight fuzzy similarity between the
+    claim and the passage.
+
+    This is only a secondary grounding signal. It is not
+    sufficient by itself to establish evidence validity.
+    """
+
+    normalized_claim = _normalize_text(
+        claim
+    )
+
+    normalized_passage = _normalize_text(
+        passage
+    )
+
+    if not normalized_claim or not normalized_passage:
+        return 0.0
+
+    return SequenceMatcher(
+        None,
+        normalized_claim,
+        normalized_passage,
+    ).ratio()
+
+
+# ----------------------------------------------------------
+# Passage preparation
+# ----------------------------------------------------------
 
 
 def _split_into_passages(
     content: str,
-    max_passage_length: int = 1800,
 ) -> list[str]:
     """
     Split source content into reasonably sized passages.
 
-    Paragraph boundaries are preferred.
-
-    Very large paragraphs are further divided into sentences.
+    Paragraph boundaries are preferred, but long paragraphs
+    are further divided so that individual LLM inputs remain
+    manageable.
     """
 
-    if not content.strip():
+    normalized = " ".join(
+        content.split()
+    )
+
+    if not normalized:
         return []
 
     paragraphs = re.split(
-        r"\n\s*\n+",
-        content,
+        r"(?<=[.!?])\s+",
+        normalized,
     )
 
     passages = []
+
+    current = ""
 
     for paragraph in paragraphs:
 
@@ -308,213 +394,275 @@ def _split_into_passages(
         if not paragraph:
             continue
 
-        if len(paragraph) <= max_passage_length:
-            passages.append(paragraph)
+        if not current:
+            current = paragraph
             continue
 
-        sentences = re.split(
-            r"(?<=[.!?])\s+",
-            paragraph,
+        candidate = (
+            f"{current} {paragraph}"
         )
 
-        current = ""
+        if len(candidate) <= MAX_PASSAGE_LENGTH:
+            current = candidate
 
-        for sentence in sentences:
+        else:
 
-            sentence = sentence.strip()
+            passages.append(
+                current[:MAX_PASSAGE_LENGTH]
+            )
 
-            if not sentence:
-                continue
+            current = paragraph
 
-            if not current:
-                current = sentence
-                continue
-
-            candidate = f"{current} {sentence}"
-
-            if len(candidate) <= max_passage_length:
-                current = candidate
-            else:
-                passages.append(current)
-                current = sentence
-
-        if current:
-            passages.append(current)
+    if current:
+        passages.append(
+            current[:MAX_PASSAGE_LENGTH]
+        )
 
     return passages
 
 
-def _score_passage(
-    claim: str,
+def _relevance_score(
+    research_question: str,
     passage: str,
 ) -> float:
     """
-    Calculate deterministic relevance between a claim
-    and a candidate passage.
+    Score a passage against the research question.
 
-    Score:
-
-        70% token overlap
-        30% sequence similarity
+    This is deliberately deterministic so that the LLM sees
+    only passages that are already relevant to the question.
     """
 
-    claim_tokens = set(_tokenize(claim))
-    passage_tokens = set(_tokenize(passage))
-
-    if not claim_tokens or not passage_tokens:
-        return 0.0
-
-    overlap = (
-        len(claim_tokens & passage_tokens)
-        / len(claim_tokens)
+    question_tokens = _tokens(
+        research_question
     )
 
-    similarity = SequenceMatcher(
+    passage_tokens = _tokens(
+        passage
+    )
+
+    if not question_tokens or not passage_tokens:
+        return 0.0
+
+    overlap = question_tokens.intersection(
+        passage_tokens
+    )
+
+    token_score = (
+        len(overlap)
+        / len(question_tokens)
+    )
+
+    fuzzy_score = SequenceMatcher(
         None,
-        _normalize_text(claim),
+        _normalize_text(research_question),
         _normalize_text(passage),
     ).ratio()
 
     return (
-        (0.70 * overlap)
-        + (0.30 * similarity)
+        0.70 * token_score
+        + 0.30 * fuzzy_score
     )
 
 
-def _extract_supporting_text(
-    claim: str,
-    source_content: str,
-) -> str | None:
+def _select_focused_passages(
+    research_question: str,
+    sources: list[Source],
+) -> list[tuple[int, str, str]]:
     """
-    Select the strongest real passage supporting a claim.
+    Select the most relevant passages from the supplied
+    sources.
 
-    The returned text always comes directly from the source.
+    Returns tuples:
+
+        (passage_id, source_url, passage_text)
     """
 
-    passages = _split_into_passages(
-        source_content
-    )
+    candidates = []
 
-    if not passages:
-        return None
+    passage_id = 1
 
-    best_passage = None
-    best_score = 0.0
+    for source in sources:
 
-    for passage in passages:
-
-        score = _score_passage(
-            claim,
-            passage,
+        passages = _split_into_passages(
+            source.content
         )
 
-        if score > best_score:
-            best_score = score
-            best_passage = passage
+        scored_passages = []
 
-    if best_passage is None:
-        return None
+        for passage in passages:
 
-    claim_tokens = set(
-        _tokenize(claim)
-    )
-
-    passage_tokens = set(
-        _tokenize(best_passage)
-    )
-
-    if not claim_tokens:
-        return None
-
-    token_overlap = (
-        len(claim_tokens & passage_tokens)
-        / len(claim_tokens)
-    )
-
-    if token_overlap < 0.35:
-        return None
-
-    return best_passage
-
-
-def _resolve_source_index(
-    source_index: int,
-    source_count: int,
-    zero_based: bool,
-) -> int | None:
-    """
-    Convert the LLM source index into a zero-based Python
-    list index.
-    """
-
-    if zero_based:
-        index = source_index
-    else:
-        index = source_index - 1
-
-    if index < 0 or index >= source_count:
-        return None
-
-    return index
-
-
-def _detect_zero_based_indexes(
-    extracted_items: list[ExtractedEvidence],
-) -> bool:
-    """
-    Detect whether the model appears to be using zero-based
-    source indexes.
-
-    A source_index of 0 is strong evidence of zero-based
-    indexing.
-    """
-
-    return any(
-        item.source_index == 0
-        for item in extracted_items
-    )
-
-
-def _deduplicate_claims(
-    extracted_items: list[ExtractedEvidence],
-) -> list[ExtractedEvidence]:
-    """
-    Remove duplicate or near-duplicate claims.
-    """
-
-    unique_items = []
-
-    for item in extracted_items:
-
-        normalized_claim = _normalize_text(
-            item.claim
-        )
-
-        if not normalized_claim:
-            continue
-
-        duplicate = False
-
-        for existing in unique_items:
-
-            existing_claim = _normalize_text(
-                existing.claim
+            score = _relevance_score(
+                research_question,
+                passage,
             )
 
-            similarity = SequenceMatcher(
-                None,
-                normalized_claim,
-                existing_claim,
-            ).ratio()
+            scored_passages.append(
+                (
+                    score,
+                    passage,
+                )
+            )
 
-            if similarity >= 0.90:
-                duplicate = True
-                break
+        scored_passages.sort(
+            key=lambda item: item[0],
+            reverse=True,
+        )
 
-        if not duplicate:
-            unique_items.append(item)
+        for score, passage in scored_passages[
+            :MAX_PASSAGES_PER_SOURCE
+        ]:
 
-    return unique_items
+            candidates.append(
+                (
+                    score,
+                    passage_id,
+                    source.url,
+                    passage,
+                )
+            )
+
+            passage_id += 1
+
+    candidates.sort(
+        key=lambda item: item[0],
+        reverse=True,
+    )
+
+    focused = []
+
+    for (
+        score,
+        current_passage_id,
+        source_url,
+        passage,
+    ) in candidates[
+        :MAX_FOCUSED_PASSAGES
+    ]:
+
+        focused.append(
+            (
+                current_passage_id,
+                source_url,
+                passage,
+            )
+        )
+
+    return focused
+
+
+# ----------------------------------------------------------
+# LLM extraction
+# ----------------------------------------------------------
+
+
+def _format_passages(
+    passages: list[tuple[int, str, str]],
+) -> str:
+    """
+    Format a small group of passages for the LLM.
+    """
+
+    sections = []
+
+    for (
+        passage_id,
+        source_url,
+        passage,
+    ) in passages:
+
+        sections.append(
+            f"""
+PASSAGE {passage_id}
+
+Source URL:
+{source_url}
+
+Text:
+{passage}
+""".strip()
+        )
+
+    return "\n\n".join(
+        sections
+    )
+
+
+def _extract_from_batch(
+    research_question: str,
+    passages: list[tuple[int, str, str]],
+) -> list[ExtractedEvidence]:
+    """
+    Run one small evidence-extraction call.
+    """
+
+    if not passages:
+        return []
+
+    response = chain.invoke(
+        {
+            "research_question": research_question,
+            "passages": _format_passages(
+                passages
+            ),
+        }
+    )
+
+    return response.evidence[
+        :MAX_EVIDENCE_PER_BATCH
+    ]
+
+
+# ----------------------------------------------------------
+# Deterministic grounding
+# ----------------------------------------------------------
+
+
+def _is_grounded_claim(
+    claim: str,
+    passage: str,
+) -> bool:
+    """
+    Determine whether a claim is sufficiently grounded in
+    its selected source passage.
+
+    Two signals are used:
+
+    1. Directional token overlap.
+    2. Fuzzy similarity.
+
+    The claim must have meaningful lexical support. Fuzzy
+    similarity can help with paraphrasing, but cannot by
+    itself establish support.
+    """
+
+    if not claim.strip():
+        return False
+
+    overlap = _token_overlap(
+        claim,
+        passage,
+    )
+
+    fuzzy = _fuzzy_similarity(
+        claim,
+        passage,
+    )
+
+    if overlap >= MIN_TOKEN_OVERLAP:
+        return True
+
+    if (
+        overlap >= 0.10
+        and fuzzy >= MIN_FUZZY_SIMILARITY
+    ):
+        return True
+
+    return False
+
+
+# ----------------------------------------------------------
+# Main node
+# ----------------------------------------------------------
 
 
 def evidence_extractor_node(
@@ -523,178 +671,320 @@ def evidence_extractor_node(
 
     print("\n[Node] evidence_extractor")
 
-    current_sources = state["current_sources"]
+    # ------------------------------------------------------
+    # Use the explicitly active research question.
+    #
+    # IMPORTANT:
+    # current_question_index already points to the NEXT
+    # question because the researcher increments it after
+    # collecting the current question's sources.
+    # ------------------------------------------------------
 
-    if not current_sources:
-        print("  No current sources available.")
+    current_question = state[
+        "active_research_question"
+    ]
 
-        return {
-            **state,
-            "pending_evidence": [],
-        }
-
-    current_index = (
-        state["current_question_index"] - 1
-    )
-
-    research_questions = state[
-        "research_questions"
+    current_question_number = state[
+        "active_research_question_number"
     ]
 
     if (
-        current_index < 0
-        or current_index >= len(research_questions)
+        current_question is None
+        or current_question_number is None
     ):
-        print("  Invalid research question index.")
+        print(
+            "  No active research question is available."
+        )
 
         return {
             **state,
             "pending_evidence": [],
         }
 
-    research_question = research_questions[
-        current_index
+    research_question = current_question.question
+
+    current_sources = state[
+        "current_sources"
     ]
 
     print(
-        "  Extracting evidence for: "
-        f"{research_question.question}"
+        "  Research question:"
     )
 
     print(
-        f"  Sources available: "
+        f"    {research_question}"
+    )
+
+    print(
+        "  Research question number: "
+        f"{current_question_number}"
+    )
+
+    print(
+        "  Sources available: "
         f"{len(current_sources)}"
     )
 
-    try:
-
-        response = chain.invoke(
-            {
-                "research_question": (
-                    research_question.question
-                ),
-                "sources": _format_sources(
-                    current_sources
-                ),
-            }
+    focused_passages = (
+        _select_focused_passages(
+            research_question,
+            current_sources,
         )
-
-    except Exception as exc:
-
-        print(
-            "  Evidence extraction failed:"
-        )
-
-        print(
-            f"  {exc}"
-        )
-
-        return {
-            **state,
-            "pending_evidence": [],
-        }
-
-    extracted_items = response.evidence
+    )
 
     print(
-        "  Evidence items extracted: "
-        f"{len(extracted_items)}"
+        "  Relevant passages selected: "
+        f"{len(focused_passages)}"
     )
 
-    if not extracted_items:
+    source_counts = {}
 
-        return {
-            **state,
-            "pending_evidence": [],
-        }
+    for (
+        _passage_id,
+        source_url,
+        _passage,
+    ) in focused_passages:
 
-    extracted_items = _deduplicate_claims(
-        extracted_items
-    )
+        source_counts[source_url] = (
+            source_counts.get(
+                source_url,
+                0,
+            )
+            + 1
+        )
 
-    if len(extracted_items) > MAX_EVIDENCE_ITEMS:
-
-        extracted_items = extracted_items[
-            :MAX_EVIDENCE_ITEMS
-        ]
-
-    zero_based = _detect_zero_based_indexes(
-        extracted_items
-    )
-
-    if zero_based:
+    for source_number, (
+        source_url,
+        count,
+    ) in enumerate(
+        source_counts.items(),
+        start=1,
+    ):
 
         print(
-            "  Detected zero-based source indexes "
-            "from model output."
+            f"    Source {source_number}: "
+            f"{count} focused passage(s)"
         )
 
-    pending_evidence = []
+    # ------------------------------------------------------
+    # Split the focused passages into small LLM batches.
+    # ------------------------------------------------------
 
-    mapped_count = 0
-
-    for item in extracted_items:
-
-        source_index = _resolve_source_index(
-            source_index=item.source_index,
-            source_count=len(current_sources),
-            zero_based=zero_based,
-        )
-
-        if source_index is None:
-
-            print(
-                "  Invalid source index for claim:"
-            )
-
-            print(
-                f"    {item.claim}"
-            )
-
-            continue
-
-        source = current_sources[
-            source_index
+    batches = [
+        focused_passages[
+            index:index + PASSAGES_PER_LLM_BATCH
         ]
+        for index in range(
+            0,
+            len(focused_passages),
+            PASSAGES_PER_LLM_BATCH,
+        )
+    ]
 
-        supporting_text = (
-            _extract_supporting_text(
-                claim=item.claim,
-                source_content=source.content,
-            )
+    print(
+        "  LLM extraction batches: "
+        f"{len(batches)}"
+    )
+
+    all_proposals = []
+
+    for batch_number, batch in enumerate(
+        batches,
+        start=1,
+    ):
+
+        print(
+            f"  Running extraction batch "
+            f"{batch_number}/{len(batches)} "
+            f"({len(batch)} passages)..."
         )
 
-        if supporting_text is None:
+        try:
+
+            proposals = _extract_from_batch(
+                research_question,
+                batch,
+            )
+
+        except Exception as exc:
 
             print(
-                "  Could not find a sufficiently "
-                "relevant supporting passage "
-                "for claim:"
+                "  Evidence extraction batch "
+                "failed:"
             )
 
             print(
-                f"    {item.claim}"
+                f"    {exc}"
             )
 
             continue
 
-        pending_evidence.append(
+        print(
+            "  Batch proposals: "
+            f"{len(proposals)}"
+        )
+
+        all_proposals.extend(
+            proposals
+        )
+
+    print(
+        "  Evidence items proposed by LLM: "
+        f"{len(all_proposals)}"
+    )
+
+    # ------------------------------------------------------
+    # Build a passage lookup.
+    # ------------------------------------------------------
+
+    passage_lookup = {
+        passage_id: (
+            source_url,
+            passage,
+        )
+        for (
+            passage_id,
+            source_url,
+            passage,
+        ) in focused_passages
+    }
+
+    evidence_items = []
+
+    seen_claims = set()
+
+    # ------------------------------------------------------
+    # Deterministic validation of every proposal.
+    # ------------------------------------------------------
+
+    for proposal in all_proposals:
+
+        claim = proposal.claim.strip()
+
+        if not claim:
+            continue
+
+        normalized_claim = (
+            _normalize_text(
+                claim
+            )
+        )
+
+        if normalized_claim in seen_claims:
+            continue
+
+        passage_data = passage_lookup.get(
+            proposal.passage_id
+        )
+
+        if passage_data is None:
+
+            print()
+            print(
+                "  REJECTED CLAIM"
+            )
+
+            print(
+                "    Invalid passage ID: "
+                f"{proposal.passage_id}"
+            )
+
+            continue
+
+        source_url, supporting_text = (
+            passage_data
+        )
+
+        if not _is_grounded_claim(
+            claim,
+            supporting_text,
+        ):
+
+            print()
+            print(
+                "  REJECTED CLAIM"
+            )
+
+            print(
+                "    Claim is not sufficiently "
+                "grounded in selected passage."
+            )
+
+            print(
+                f"    Claim: {claim}"
+            )
+
+            print(
+                f"    Passage ID: "
+                f"{proposal.passage_id}"
+            )
+
+            continue
+
+        evidence_items.append(
             Evidence(
-                claim=item.claim.strip(),
-                source_url=source.url,
+                research_question_number=(
+                    current_question_number
+                ),
+                claim=claim,
+                source_url=source_url,
                 supporting_text=supporting_text,
             )
         )
 
-        mapped_count += 1
+        seen_claims.add(
+            normalized_claim
+        )
+
+        print()
+        print(
+            "  ACCEPTED CLAIM"
+        )
+
+        print(
+            f"    Question: "
+            f"{current_question_number}"
+        )
+
+        print(
+            f"    Claim: {claim}"
+        )
+
+        print(
+            f"    Passage ID: "
+            f"{proposal.passage_id}"
+        )
+
+        print(
+            f"    Source: {source_url}"
+        )
+
+        if len(evidence_items) >= (
+            MAX_EVIDENCE_PER_QUESTION
+        ):
+            break
+
+    print()
+    print(
+        "  Evidence extraction summary:"
+    )
 
     print(
-        "  Evidence items mapped to real "
-        "source passages: "
-        f"{mapped_count}"
+        f"    LLM proposals: "
+        f"{len(all_proposals)}"
+    )
+
+    print(
+        f"    Accepted: "
+        f"{len(evidence_items)}"
+    )
+
+    print(
+        f"    Rejected: "
+        f"{len(all_proposals) - len(evidence_items)}"
     )
 
     return {
         **state,
-        "pending_evidence": pending_evidence,
+        "pending_evidence": evidence_items,
     }
