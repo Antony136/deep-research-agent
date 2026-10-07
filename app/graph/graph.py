@@ -15,6 +15,9 @@ Current workflow:
 Evidence Extractor
       |
       v
+Evidence Verifier
+      |
+      v
   More research?
     /       \
   yes       no
@@ -27,6 +30,9 @@ from langgraph.graph import END, START, StateGraph
 
 from app.graph.nodes.evidence_extractor import (
     evidence_extractor_node,
+)
+from app.graph.nodes.evidence_verifier import (
+    evidence_verifier_node,
 )
 from app.graph.nodes.planner import planner_node
 from app.graph.nodes.researcher import researcher_node
@@ -51,13 +57,8 @@ def should_continue_research(
 
 
 def build_research_graph():
-    """
-    Build and compile the complete research workflow.
-    """
 
-    graph = StateGraph(
-        ResearchState
-    )
+    graph = StateGraph(ResearchState)
 
     # ------------------------------------------------------
     # NODES
@@ -78,6 +79,11 @@ def build_research_graph():
         evidence_extractor_node,
     )
 
+    graph.add_node(
+        "evidence_verifier",
+        evidence_verifier_node,
+    )
+
     # ------------------------------------------------------
     # INITIAL FLOW
     # ------------------------------------------------------
@@ -92,11 +98,18 @@ def build_research_graph():
         "researcher",
     )
 
-    # Research must be analyzed before deciding
-    # whether another research question remains.
     graph.add_edge(
         "researcher",
         "evidence_extractor",
+    )
+
+    # ------------------------------------------------------
+    # EVIDENCE VERIFICATION
+    # ------------------------------------------------------
+
+    graph.add_edge(
+        "evidence_extractor",
+        "evidence_verifier",
     )
 
     # ------------------------------------------------------
@@ -104,16 +117,12 @@ def build_research_graph():
     # ------------------------------------------------------
 
     graph.add_conditional_edges(
-        "evidence_extractor",
+        "evidence_verifier",
         should_continue_research,
         {
             "research": "researcher",
             "end": END,
         },
     )
-
-    # ------------------------------------------------------
-    # COMPILE
-    # ------------------------------------------------------
 
     return graph.compile()

@@ -33,6 +33,12 @@ class ResearchState(TypedDict):
     # currently being processed.
     current_sources: list[Source]
 
+    # Evidence extracted by the LLM for the current
+    # research question, before deterministic validation.
+    pending_evidence: list[Evidence]
+
+    # Evidence that passed deterministic validation
+    # and is trusted by the rest of the pipeline.
     evidence: list[Evidence]
 
     # WORKFLOW CONTROL

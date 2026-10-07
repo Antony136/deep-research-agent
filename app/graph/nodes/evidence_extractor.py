@@ -5,8 +5,9 @@ This node takes the sources collected for the current research
 question and asks the LLM to extract factual claims together
 with the source URL and supporting text.
 
-The extractor uses one LLM call per research question rather
-than one call per source.
+Extracted evidence is placed into pending_evidence first.
+A separate deterministic verifier is responsible for moving
+only grounded evidence into the trusted evidence collection.
 """
 
 import os
@@ -19,9 +20,7 @@ from pydantic import BaseModel, Field
 from app.graph.state import ResearchState
 from app.schemas.research import Evidence
 
-
 load_dotenv()
-
 
 MODEL_NAME = os.getenv(
     "OLLAMA_MODEL",
@@ -33,7 +32,6 @@ BASE_URL = os.getenv(
     "http://localhost:11434",
 )
 
-
 model = ChatOllama(
     model=MODEL_NAME,
     base_url=BASE_URL,
@@ -42,10 +40,6 @@ model = ChatOllama(
 
 
 class EvidenceExtractionOutput(BaseModel):
-    """
-    Structured output returned by the evidence extractor.
-    """
-
     evidence: list[Evidence] = Field(
         default_factory=list,
         description=(
@@ -110,24 +104,16 @@ Sources:
     ]
 )
 
-
 chain = prompt | structured_model
 
 
-def _format_sources(
-    sources,
-) -> str:
-    """
-    Convert Source objects into structured text for the LLM.
-    """
-
+def _format_sources(sources) -> str:
     sections = []
 
     for index, source in enumerate(
         sources,
         start=1,
     ):
-
         sections.append(
             f"""
 SOURCE {index}
@@ -146,58 +132,36 @@ Content:
     if not sections:
         return "No sources were available."
 
-    return "\n\n".join(
-        sections
-    )
+    return "\n\n".join(sections)
 
 
 def evidence_extractor_node(
     state: ResearchState,
 ) -> ResearchState:
-    """
-    Extract evidence from the sources belonging to the
-    current research question.
-    """
 
     print("\n[Node] evidence_extractor")
 
     questions = state["research_questions"]
-
-    current_index = state[
-        "current_question_index"
-    ]
+    current_index = state["current_question_index"]
 
     if current_index <= 0:
         return {
             **state,
+            "pending_evidence": [],
         }
 
-    # The researcher increments the index after completing
-    # the current research question.
-    question = questions[
-        current_index - 1
-    ]
-
-    # Only process the sources collected for this question.
-    sources = state[
-        "current_sources"
-    ]
+    question = questions[current_index - 1]
+    sources = state["current_sources"]
 
     if not sources:
-
         print(
             "  No sources available "
             "for evidence extraction."
         )
 
-        research_complete = (
-            current_index
-            >= len(questions)
-        )
-
         return {
             **state,
-            "research_complete": research_complete,
+            "pending_evidence": [],
         }
 
     print(
@@ -215,7 +179,6 @@ def evidence_extractor_node(
     )
 
     try:
-
         response = chain.invoke(
             {
                 "question": question.question,
@@ -235,40 +198,19 @@ def evidence_extractor_node(
 
         return {
             **state,
+            "pending_evidence": [],
         }
 
-    extracted_evidence = (
-        response.evidence
-    )
+    extracted_evidence = response.evidence
 
     print(
         f"  Evidence items extracted: "
         f"{len(extracted_evidence)}"
     )
 
-    existing_evidence = state[
-        "evidence"
-    ]
-
-    combined_evidence = (
-        existing_evidence
-        + extracted_evidence
-    )
-
-    research_complete = (
-        current_index
-        >= len(questions)
-    )
-
-    if research_complete:
-
-        print(
-            "\n  All planned research "
-            "questions completed."
-        )
-
+    # Do NOT add the LLM output directly to trusted
+    # evidence. It must pass deterministic verification first.
     return {
         **state,
-        "evidence": combined_evidence,
-        "research_complete": research_complete,
+        "pending_evidence": extracted_evidence,
     }
