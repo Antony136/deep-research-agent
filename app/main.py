@@ -3,17 +3,22 @@ Entry point for the Deep Research Agent.
 
 Runs the complete research workflow and displays
 the research plan, collected sources, extracted
-evidence, and adaptive research decision.
+evidence, and adaptive research decisions.
 """
 
 from app.graph.graph import build_research_graph
 
 
-def print_separator(char="=", width=80):
+def print_separator(
+    char="=",
+    width=80,
+):
     print(char * width)
 
 
-def print_research_plan(research_questions):
+def print_research_plan(
+    research_questions,
+):
     print_separator()
     print("RESEARCH PLAN")
     print_separator()
@@ -28,12 +33,15 @@ def print_research_plan(research_questions):
         start=1,
     ):
         print()
+
         print(
             f"[{index}] "
             f"{research_question.question}"
         )
 
-        print("    Search queries:")
+        print(
+            "    Search queries:"
+        )
 
         for query in research_question.search_queries:
             print(
@@ -41,7 +49,9 @@ def print_research_plan(research_questions):
             )
 
 
-def print_sources(sources):
+def print_sources(
+    sources,
+):
     print_separator()
     print("COLLECTED SOURCES")
     print_separator()
@@ -73,7 +83,9 @@ def print_sources(sources):
         )
 
 
-def print_evidence(evidence):
+def print_evidence(
+    evidence,
+):
     print_separator()
     print("EXTRACTED EVIDENCE")
     print_separator()
@@ -84,7 +96,10 @@ def print_evidence(evidence):
     )
 
     if not evidence:
-        print("\nNo evidence was extracted.")
+        print(
+            "\nNo evidence was extracted."
+        )
+
         return
 
     for index, item in enumerate(
@@ -122,10 +137,24 @@ def print_evidence(evidence):
         )
 
 
-def print_research_decision(state):
+def print_research_decision(
+    state,
+):
     print_separator()
     print("ADAPTIVE RESEARCH DECISION")
     print_separator()
+
+    print(
+        "Research round: "
+        f"{state['research_round']}"
+    )
+
+    print(
+        "Maximum research rounds: "
+        f"{state['max_research_rounds']}"
+    )
+
+    print()
 
     print(
         "Research sufficient: "
@@ -139,6 +168,27 @@ def print_research_decision(state):
     print(
         f"  {state['research_decision_reason']}"
     )
+
+    print()
+
+    print("Remaining research gaps:")
+
+    research_gaps = state[
+        "research_gaps"
+    ]
+
+    if not research_gaps:
+
+        print(
+            "  None"
+        )
+
+    else:
+
+        for gap in research_gaps:
+            print(
+                f"  - {gap}"
+            )
 
 
 def main():
@@ -156,26 +206,72 @@ def main():
     print("-" * 80)
     print(question)
 
-    # ------------------------------------------------------
-    # INITIAL STATE
-    # ------------------------------------------------------
-
     initial_state = {
         "question": question,
+
+        # --------------------------------------------------
+        # RESEARCH PLAN
+        # --------------------------------------------------
+
         "research_questions": [],
+
+        # --------------------------------------------------
+        # RESEARCH DATA
+        # --------------------------------------------------
+
         "sources": [],
         "current_sources": [],
         "pending_evidence": [],
         "evidence": [],
+
+        # --------------------------------------------------
+        # WORKFLOW CONTROL
+        # --------------------------------------------------
+
         "current_question_index": 0,
         "research_complete": False,
+
+        # --------------------------------------------------
+        # ADAPTIVE RESEARCH
+        # --------------------------------------------------
+
+        # Round 1 represents the original planner's
+        # research plan.
+        "research_round": 1,
+
+        # Hard safety limit preventing an endless research
+        # loop.
+        #
+        # Round 1:
+        #   Initial research plan
+        #
+        # Round 2:
+        #   First adaptive research plan
+        #
+        # Round 3:
+        #   Second adaptive research plan
+        "max_research_rounds": 3,
+
+        "research_gaps": [],
+
+        # --------------------------------------------------
+        # SUFFICIENCY
+        # --------------------------------------------------
+
         "research_sufficient": False,
         "research_decision_reason": "",
+
+        # --------------------------------------------------
+        # FINAL OUTPUT
+        # --------------------------------------------------
+
         "report": None,
     }
 
     print("\n")
-    print("BUILDING RESEARCH GRAPH...")
+    print(
+        "BUILDING RESEARCH GRAPH..."
+    )
 
     graph = build_research_graph()
 
@@ -195,24 +291,26 @@ def main():
 
     print("\n")
 
-    # ------------------------------------------------------
-    # RESULTS
-    # ------------------------------------------------------
-
     print_research_plan(
-        final_state["research_questions"]
+        final_state[
+            "research_questions"
+        ]
     )
 
     print("\n")
 
     print_sources(
-        final_state["sources"]
+        final_state[
+            "sources"
+        ]
     )
 
     print("\n")
 
     print_evidence(
-        final_state["evidence"]
+        final_state[
+            "evidence"
+        ]
     )
 
     print("\n")
@@ -222,10 +320,6 @@ def main():
     )
 
     print("\n")
-
-    # ------------------------------------------------------
-    # SUMMARY
-    # ------------------------------------------------------
 
     print_separator()
     print("RESEARCH WORKFLOW SUMMARY")
@@ -252,6 +346,11 @@ def main():
     )
 
     print(
+        "Research round: "
+        f"{final_state['research_round']}"
+    )
+
+    print(
         "Research complete: "
         f"{final_state['research_complete']}"
     )
@@ -262,9 +361,11 @@ def main():
     )
 
     print_separator()
+
     print(
         "RESEARCH PIPELINE COMPLETED"
     )
+
     print_separator()
 
 

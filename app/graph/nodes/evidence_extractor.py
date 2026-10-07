@@ -1,32 +1,21 @@
 """
 Evidence extraction node for the Deep Research Agent.
 
-The LLM identifies:
+The extractor identifies multiple factual claims from the
+currently researched sources.
 
-- a factual claim
-- the source that supports the claim
+The LLM is responsible only for identifying:
+    - the claim
+    - the source containing the claim
 
-The LLM is NOT trusted to generate the supporting passage.
+Supporting text is always selected deterministically from
+the actual source content.
 
-Instead, the application deterministically extracts a
-supporting passage from the actual collected source content.
-
-This creates a stronger grounding boundary:
-
-    LLM claim
-        +
-    LLM source selection
-        ↓
-    deterministic passage extraction
-        ↓
-    deterministic evidence validation
-        ↓
-    trusted evidence
+This prevents the LLM from inventing or rewriting evidence.
 """
 
 import os
 import re
-import unicodedata
 from difflib import SequenceMatcher
 
 from dotenv import load_dotenv
@@ -35,7 +24,7 @@ from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 
 from app.graph.state import ResearchState
-from app.schemas.research import Evidence, Source
+from app.schemas.research import Evidence
 
 
 load_dotenv()
@@ -51,6 +40,8 @@ BASE_URL = os.getenv(
     "http://localhost:11434",
 )
 
+MAX_EVIDENCE_ITEMS = 5
+
 
 model = ChatOllama(
     model=MODEL_NAME,
@@ -61,41 +52,39 @@ model = ChatOllama(
 
 class ExtractedEvidence(BaseModel):
     """
-    Evidence returned by the LLM.
+    LLM-selected evidence claim.
 
-    The model identifies the source using its numeric
-    position in the supplied source list.
+    The LLM identifies the factual claim and the source
+    containing it.
 
-    The model does NOT generate supporting text.
+    It does NOT generate supporting text.
     """
 
     claim: str = Field(
         description=(
-            "One specific factual claim that is directly "
-            "supported by the selected source."
+            "A specific factual claim directly supported "
+            "by one of the supplied sources."
         )
     )
 
     source_index: int = Field(
         description=(
-            "The numeric index of the source supporting "
-            "this claim. Prefer 1-based indexing: 1 means "
-            "the first source, 2 means the second source, "
-            "and so on."
+            "The numeric index of the source containing "
+            "direct support for the claim."
         )
     )
 
 
 class EvidenceExtractionOutput(BaseModel):
     """
-    Structured output returned by the evidence extractor.
+    Structured output returned by the LLM.
     """
 
     evidence: list[ExtractedEvidence] = Field(
         default_factory=list,
         description=(
-            "Specific factual claims supported by the "
-            "supplied research sources."
+            "Independent factual claims supported by the "
+            "supplied sources."
         ),
     )
 
@@ -114,49 +103,82 @@ You are the evidence extraction component of a deep
 research agent.
 
 Your task is to identify factual claims from the supplied
-web sources that directly help answer the research question.
+sources that help answer the research question.
 
-IMPORTANT SOURCE RULES:
+IMPORTANT RULES:
 
-1. Every source has a numeric SOURCE INDEX.
-2. Select the source using its SOURCE INDEX.
-3. Prefer 1-based indexing.
-4. SOURCE INDEX 1 means the first source.
-5. SOURCE INDEX 2 means the second source.
-6. Never invent a URL.
-7. Never modify a URL.
-8. Never use information from your general knowledge.
+1. Use ONLY information explicitly supported by the
+   supplied sources.
 
-IMPORTANT CLAIM RULES:
+2. Do NOT use your general knowledge.
 
-9. State one specific factual claim.
-10. The claim must be directly supported by the selected
-    source.
-11. Do not invent facts.
-12. Do not use your general knowledge.
-13. Do not combine information from multiple sources into
-    one claim.
-14. Ignore opinions, advertisements, navigation text,
-    and unrelated information.
-15. Prefer concrete facts, documented capabilities,
-    limitations, comparisons, examples, and production
-    characteristics.
-16. If a source does not contain useful evidence, do not
-    use that source.
-17. If no useful evidence exists, return an empty evidence
-    list.
+3. Do NOT invent facts.
 
-IMPORTANT:
+4. Do NOT combine information from different sources into
+   one claim.
 
-Do NOT generate a supporting quote or passage.
+5. Each claim must be independently supported by exactly
+   one source.
 
-The application will extract the supporting passage
-directly from the actual source content after you select
-the source.
+6. Return the source index that directly supports each claim.
 
-Your responsibility is ONLY:
+7. Claims should be specific and factual.
 
-    factual claim + source index
+8. Prefer useful information about:
+   - capabilities
+   - architecture
+   - production characteristics
+   - scalability
+   - persistence
+   - state management
+   - reliability
+   - deployment
+   - real-world usage
+   - limitations
+   - tradeoffs
+
+9. Avoid vague claims such as:
+   - "This framework is useful."
+   - "It has many features."
+   - "It is good for production."
+
+10. Avoid opinions unless the source explicitly presents
+    them as findings, limitations, or documented tradeoffs.
+
+11. Do not generate supporting quotations.
+
+12. The application will independently extract the exact
+    supporting passage from the source.
+
+13. Extract multiple independent claims when the sources
+    contain multiple useful facts.
+
+14. Do not create multiple claims that express essentially
+    the same fact.
+
+15. Prefer high-value claims over minor implementation
+    details.
+
+16. Return up to 5 strong evidence items.
+
+17. If the sources do not contain useful evidence, return
+    an empty list.
+
+SOURCE INDEXING:
+
+Sources are numbered starting from 1.
+
+For example:
+
+SOURCE 1
+...
+
+SOURCE 2
+...
+
+If a claim is supported by SOURCE 2, return:
+
+source_index = 2
 
 Return only the requested structured output.
 """,
@@ -166,7 +188,7 @@ Return only the requested structured output.
             """
 Research question:
 
-{question}
+{research_question}
 
 Sources:
 
@@ -180,22 +202,20 @@ Sources:
 chain = prompt | structured_model
 
 
-def _format_sources(
-    sources: list[Source],
-) -> str:
+def _format_sources(sources) -> str:
     """
-    Format sources with explicit numeric identifiers.
+    Format sources for the LLM with stable numeric indexes.
     """
+
+    if not sources:
+        return "No sources available."
 
     sections = []
 
-    for index, source in enumerate(
-        sources,
-        start=1,
-    ):
+    for index, source in enumerate(sources, start=1):
         sections.append(
             f"""
-SOURCE INDEX: {index}
+SOURCE {index}
 
 Title:
 {source.title}
@@ -208,33 +228,25 @@ Content:
 """.strip()
         )
 
-    if not sections:
-        return "No sources were available."
-
     return "\n\n".join(sections)
 
 
 def _normalize_text(text: str) -> str:
     """
-    Normalize text for deterministic comparison.
+    Normalize text for deterministic matching.
     """
-
-    text = unicodedata.normalize(
-        "NFKC",
-        text,
-    )
 
     text = text.lower()
 
-    text = re.sub(
-        r"[\u2010\u2011\u2012\u2013\u2014\u2212]",
-        "-",
-        text,
-    )
+    text = text.replace("\u00ad", "")
+
+    text = text.replace("–", "-")
+    text = text.replace("—", "-")
+    text = text.replace("−", "-")
 
     text = re.sub(
-        r"[^\w\s]",
-        " ",
+        r"-\s*\n\s*",
+        "",
         text,
     )
 
@@ -244,34 +256,43 @@ def _normalize_text(text: str) -> str:
         text,
     )
 
-    return text.strip()
+    text = re.sub(
+        r"[^\w\s%$.-]",
+        " ",
+        text,
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text,
+    ).strip()
 
 
 def _tokenize(text: str) -> list[str]:
     """
-    Convert text into normalized word tokens.
+    Convert text into normalized tokens.
     """
 
     normalized = _normalize_text(text)
 
-    if not normalized:
-        return []
-
-    return re.findall(
-        r"\b\w+\b",
-        normalized,
-    )
+    return normalized.split()
 
 
 def _split_into_passages(
     content: str,
+    max_passage_length: int = 1800,
 ) -> list[str]:
     """
     Split source content into reasonably sized passages.
 
-    Paragraphs are preferred. Long paragraphs are further
-    split into sentences.
+    Paragraph boundaries are preferred.
+
+    Very large paragraphs are further divided into sentences.
     """
+
+    if not content.strip():
+        return []
 
     paragraphs = re.split(
         r"\n\s*\n+",
@@ -287,10 +308,8 @@ def _split_into_passages(
         if not paragraph:
             continue
 
-        if len(paragraph) <= 1200:
-            passages.append(
-                paragraph
-            )
+        if len(paragraph) <= max_passage_length:
+            passages.append(paragraph)
             continue
 
         sentences = re.split(
@@ -311,52 +330,18 @@ def _split_into_passages(
                 current = sentence
                 continue
 
-            candidate = (
-                f"{current} {sentence}"
-            )
+            candidate = f"{current} {sentence}"
 
-            if len(candidate) <= 1200:
+            if len(candidate) <= max_passage_length:
                 current = candidate
             else:
-                passages.append(
-                    current
-                )
+                passages.append(current)
                 current = sentence
 
         if current:
-            passages.append(
-                current
-            )
+            passages.append(current)
 
     return passages
-
-
-def _token_overlap(
-    claim_tokens: list[str],
-    passage_tokens: list[str],
-) -> float:
-    """
-    Calculate the percentage of claim tokens that occur
-    in the candidate passage.
-    """
-
-    if not claim_tokens:
-        return 0.0
-
-    passage_token_set = set(
-        passage_tokens
-    )
-
-    matched = sum(
-        1
-        for token in claim_tokens
-        if token in passage_token_set
-    )
-
-    return (
-        matched
-        / len(claim_tokens)
-    )
 
 
 def _score_passage(
@@ -364,70 +349,50 @@ def _score_passage(
     passage: str,
 ) -> float:
     """
-    Score how strongly a source passage supports a claim.
+    Calculate deterministic relevance between a claim
+    and a candidate passage.
 
-    The score combines:
+    Score:
 
-    - token overlap
-    - character similarity
-
-    This is deterministic and does not call an LLM.
+        70% token overlap
+        30% sequence similarity
     """
 
-    claim_tokens = _tokenize(
-        claim
-    )
+    claim_tokens = set(_tokenize(claim))
+    passage_tokens = set(_tokenize(passage))
 
-    passage_tokens = _tokenize(
-        passage
-    )
-
-    if not claim_tokens:
+    if not claim_tokens or not passage_tokens:
         return 0.0
 
-    if not passage_tokens:
-        return 0.0
-
-    overlap = _token_overlap(
-        claim_tokens,
-        passage_tokens,
-    )
-
-    normalized_claim = _normalize_text(
-        claim
-    )
-
-    normalized_passage = _normalize_text(
-        passage
+    overlap = (
+        len(claim_tokens & passage_tokens)
+        / len(claim_tokens)
     )
 
     similarity = SequenceMatcher(
         None,
-        normalized_claim,
-        normalized_passage,
+        _normalize_text(claim),
+        _normalize_text(passage),
     ).ratio()
 
-    # Token overlap is more important because the claim may
-    # legitimately paraphrase the source.
     return (
-        (overlap * 0.70)
-        + (similarity * 0.30)
+        (0.70 * overlap)
+        + (0.30 * similarity)
     )
 
 
 def _extract_supporting_text(
     claim: str,
-    source: Source,
+    source_content: str,
 ) -> str | None:
     """
-    Find the strongest source passage supporting the claim.
+    Select the strongest real passage supporting a claim.
 
-    The returned text is copied directly from the actual
-    source content. The LLM never generates this text.
+    The returned text always comes directly from the source.
     """
 
     passages = _split_into_passages(
-        source.content
+        source_content
     )
 
     if not passages:
@@ -439,8 +404,8 @@ def _extract_supporting_text(
     for passage in passages:
 
         score = _score_passage(
-            claim=claim,
-            passage=passage,
+            claim,
+            passage,
         )
 
         if score > best_score:
@@ -450,24 +415,23 @@ def _extract_supporting_text(
     if best_passage is None:
         return None
 
-    claim_tokens = _tokenize(
-        claim
+    claim_tokens = set(
+        _tokenize(claim)
     )
 
-    passage_tokens = _tokenize(
-        best_passage
+    passage_tokens = set(
+        _tokenize(best_passage)
     )
 
-    overlap = _token_overlap(
-        claim_tokens,
-        passage_tokens,
+    if not claim_tokens:
+        return None
+
+    token_overlap = (
+        len(claim_tokens & passage_tokens)
+        / len(claim_tokens)
     )
 
-    # Require meaningful lexical support.
-    #
-    # This prevents the extractor from selecting an arbitrary
-    # paragraph merely because it shares a few common words.
-    if overlap < 0.35:
+    if token_overlap < 0.35:
         return None
 
     return best_passage
@@ -476,180 +440,142 @@ def _extract_supporting_text(
 def _resolve_source_index(
     source_index: int,
     source_count: int,
-    zero_based_mode: bool,
+    zero_based: bool,
 ) -> int | None:
     """
-    Convert the LLM's source index into a zero-based Python
+    Convert the LLM source index into a zero-based Python
     list index.
-
-    Qwen has occasionally returned 0-based indexes despite
-    receiving explicit 1-based instructions.
-
-    When the batch contains index 0, the batch is treated as
-    zero-based for compatibility.
     """
 
-    if zero_based_mode:
+    if zero_based:
+        index = source_index
+    else:
+        index = source_index - 1
 
-        if (
-            0
-            <= source_index
-            < source_count
-        ):
-            return source_index
-
+    if index < 0 or index >= source_count:
         return None
 
-    if (
-        1
-        <= source_index
-        <= source_count
-    ):
-        return source_index - 1
-
-    return None
+    return index
 
 
-def _convert_extracted_evidence(
+def _detect_zero_based_indexes(
     extracted_items: list[ExtractedEvidence],
-    sources: list[Source],
-) -> list[Evidence]:
+) -> bool:
     """
-    Convert LLM claims and source indexes into Evidence.
+    Detect whether the model appears to be using zero-based
+    source indexes.
 
-    Supporting text is extracted deterministically from the
-    actual source content.
+    A source_index of 0 is strong evidence of zero-based
+    indexing.
     """
 
-    evidence = []
-
-    if not sources:
-        return evidence
-
-    zero_based_mode = any(
+    return any(
         item.source_index == 0
         for item in extracted_items
     )
 
-    if zero_based_mode:
-        print(
-            "  Detected zero-based source indexes "
-            "from model output."
-        )
+
+def _deduplicate_claims(
+    extracted_items: list[ExtractedEvidence],
+) -> list[ExtractedEvidence]:
+    """
+    Remove duplicate or near-duplicate claims.
+    """
+
+    unique_items = []
 
     for item in extracted_items:
 
-        source_position = (
-            _resolve_source_index(
-                source_index=item.source_index,
-                source_count=len(sources),
-                zero_based_mode=zero_based_mode,
-            )
+        normalized_claim = _normalize_text(
+            item.claim
         )
 
-        if source_position is None:
-            print(
-                "  Ignoring evidence with invalid "
-                f"source index: {item.source_index}"
-            )
+        if not normalized_claim:
             continue
 
-        source = sources[
-            source_position
-        ]
+        duplicate = False
 
-        supporting_text = (
-            _extract_supporting_text(
-                claim=item.claim,
-                source=source,
-            )
-        )
+        for existing in unique_items:
 
-        if supporting_text is None:
-            print(
-                "  Could not find a sufficiently "
-                "relevant supporting passage for claim:"
+            existing_claim = _normalize_text(
+                existing.claim
             )
-            print(
-                f"    {item.claim}"
-            )
-            continue
 
-        evidence.append(
-            Evidence(
-                claim=item.claim,
-                source_url=source.url,
-                supporting_text=supporting_text,
-            )
-        )
+            similarity = SequenceMatcher(
+                None,
+                normalized_claim,
+                existing_claim,
+            ).ratio()
 
-    return evidence
+            if similarity >= 0.90:
+                duplicate = True
+                break
+
+        if not duplicate:
+            unique_items.append(item)
+
+    return unique_items
 
 
 def evidence_extractor_node(
     state: ResearchState,
 ) -> ResearchState:
-    """
-    Extract evidence for the current research question.
-    """
 
-    print(
-        "\n[Node] evidence_extractor"
+    print("\n[Node] evidence_extractor")
+
+    current_sources = state["current_sources"]
+
+    if not current_sources:
+        print("  No current sources available.")
+
+        return {
+            **state,
+            "pending_evidence": [],
+        }
+
+    current_index = (
+        state["current_question_index"] - 1
     )
 
-    questions = state[
+    research_questions = state[
         "research_questions"
     ]
 
-    current_index = state[
-        "current_question_index"
-    ]
-
-    if current_index <= 0:
-        return {
-            **state,
-            "pending_evidence": [],
-        }
-
-    question = questions[
-        current_index - 1
-    ]
-
-    sources = state[
-        "current_sources"
-    ]
-
-    if not sources:
-        print(
-            "  No sources available "
-            "for evidence extraction."
-        )
+    if (
+        current_index < 0
+        or current_index >= len(research_questions)
+    ):
+        print("  Invalid research question index.")
 
         return {
             **state,
             "pending_evidence": [],
         }
+
+    research_question = research_questions[
+        current_index
+    ]
 
     print(
         "  Extracting evidence for: "
-        f"{question.question}"
+        f"{research_question.question}"
     )
 
     print(
-        "  Sources available: "
-        f"{len(sources)}"
-    )
-
-    formatted_sources = _format_sources(
-        sources
+        f"  Sources available: "
+        f"{len(current_sources)}"
     )
 
     try:
 
         response = chain.invoke(
             {
-                "question": question.question,
-                "sources": formatted_sources,
+                "research_question": (
+                    research_question.question
+                ),
+                "sources": _format_sources(
+                    current_sources
+                ),
             }
         )
 
@@ -668,29 +594,107 @@ def evidence_extractor_node(
             "pending_evidence": [],
         }
 
-    extracted_items = (
-        response.evidence
-    )
+    extracted_items = response.evidence
 
     print(
         "  Evidence items extracted: "
         f"{len(extracted_items)}"
     )
 
-    extracted_evidence = (
-        _convert_extracted_evidence(
-            extracted_items=extracted_items,
-            sources=sources,
-        )
+    if not extracted_items:
+
+        return {
+            **state,
+            "pending_evidence": [],
+        }
+
+    extracted_items = _deduplicate_claims(
+        extracted_items
     )
 
+    if len(extracted_items) > MAX_EVIDENCE_ITEMS:
+
+        extracted_items = extracted_items[
+            :MAX_EVIDENCE_ITEMS
+        ]
+
+    zero_based = _detect_zero_based_indexes(
+        extracted_items
+    )
+
+    if zero_based:
+
+        print(
+            "  Detected zero-based source indexes "
+            "from model output."
+        )
+
+    pending_evidence = []
+
+    mapped_count = 0
+
+    for item in extracted_items:
+
+        source_index = _resolve_source_index(
+            source_index=item.source_index,
+            source_count=len(current_sources),
+            zero_based=zero_based,
+        )
+
+        if source_index is None:
+
+            print(
+                "  Invalid source index for claim:"
+            )
+
+            print(
+                f"    {item.claim}"
+            )
+
+            continue
+
+        source = current_sources[
+            source_index
+        ]
+
+        supporting_text = (
+            _extract_supporting_text(
+                claim=item.claim,
+                source_content=source.content,
+            )
+        )
+
+        if supporting_text is None:
+
+            print(
+                "  Could not find a sufficiently "
+                "relevant supporting passage "
+                "for claim:"
+            )
+
+            print(
+                f"    {item.claim}"
+            )
+
+            continue
+
+        pending_evidence.append(
+            Evidence(
+                claim=item.claim.strip(),
+                source_url=source.url,
+                supporting_text=supporting_text,
+            )
+        )
+
+        mapped_count += 1
+
     print(
-        "  Evidence items mapped to "
-        "real source passages: "
-        f"{len(extracted_evidence)}"
+        "  Evidence items mapped to real "
+        "source passages: "
+        f"{mapped_count}"
     )
 
     return {
         **state,
-        "pending_evidence": extracted_evidence,
+        "pending_evidence": pending_evidence,
     }

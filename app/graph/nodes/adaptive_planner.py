@@ -1,0 +1,316 @@
+"""
+Adaptive planner node for the Deep Research Agent.
+
+The adaptive planner is activated only when:
+
+1. The initial research plan has been exhausted.
+2. The verified evidence is still insufficient.
+
+It converts the missing information identified by the
+research sufficiency evaluator into targeted follow-up
+research questions.
+
+The planner does not perform web searches itself.
+The existing researcher node handles those questions.
+"""
+
+import os
+
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_ollama import ChatOllama
+from pydantic import BaseModel, Field
+
+from app.graph.state import ResearchState
+from app.schemas.research import ResearchQuestion
+
+
+load_dotenv()
+
+
+MODEL_NAME = os.getenv(
+    "OLLAMA_MODEL",
+    "qwen2.5-coder:7b",
+)
+
+BASE_URL = os.getenv(
+    "OLLAMA_BASE_URL",
+    "http://localhost:11434",
+)
+
+MAX_FOLLOW_UP_QUESTIONS = 3
+
+
+model = ChatOllama(
+    model=MODEL_NAME,
+    base_url=BASE_URL,
+    temperature=0,
+)
+
+
+class AdaptiveResearchOutput(BaseModel):
+    """
+    Structured follow-up research plan generated from
+    identified research gaps.
+    """
+
+    research_questions: list[ResearchQuestion] = Field(
+        default_factory=list,
+        description=(
+            "Targeted research questions that directly "
+            "address the identified research gaps."
+        ),
+    )
+
+
+structured_model = model.with_structured_output(
+    AdaptiveResearchOutput
+)
+
+
+prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+You are the adaptive planning component of a deep
+research agent.
+
+The initial research plan has already been completed,
+but the verified evidence is still insufficient.
+
+Your task is to create a small set of targeted follow-up
+research questions that directly address the identified
+research gaps.
+
+IMPORTANT:
+
+1. Use the user's original research question as the goal.
+2. Use ONLY the supplied research gaps to determine what
+   additional information is needed.
+3. Do not repeat research questions that have already been
+   investigated.
+4. Do not generate broad or unrelated questions.
+5. Each follow-up question must address a specific factual
+   gap.
+6. Provide useful web search queries for each question.
+7. Search queries should be concrete and directly useful
+   for finding reliable sources.
+8. Prefer authoritative documentation, official sources,
+   technical documentation, engineering reports, reputable
+   case studies, and other high-quality sources.
+9. Do not answer the research questions yourself.
+10. Do not invent facts.
+11. Generate at most 3 follow-up research questions.
+12. If the supplied gaps do not justify additional research,
+    return an empty list.
+
+The resulting questions will be passed to the existing
+researcher node.
+
+Return only the requested structured output.
+""",
+        ),
+        (
+            "human",
+            """
+Original research question:
+
+{question}
+
+Research gaps identified by the sufficiency evaluator:
+
+{research_gaps}
+
+Research questions already investigated:
+
+{existing_questions}
+""",
+        ),
+    ]
+)
+
+
+chain = prompt | structured_model
+
+
+def _format_research_gaps(
+    gaps: list[str],
+) -> str:
+    """
+    Format identified research gaps for the LLM.
+    """
+
+    if not gaps:
+        return "No research gaps were identified."
+
+    return "\n".join(
+        f"- {gap}"
+        for gap in gaps
+    )
+
+
+def _format_existing_questions(
+    questions: list[ResearchQuestion],
+) -> str:
+    """
+    Format previously investigated questions so the
+    adaptive planner can avoid unnecessary duplication.
+    """
+
+    if not questions:
+        return "No previous research questions."
+
+    sections = []
+
+    for index, question in enumerate(
+        questions,
+        start=1,
+    ):
+        sections.append(
+            f"""
+QUESTION {index}
+
+Research question:
+{question.question}
+
+Search queries:
+{", ".join(question.search_queries)}
+""".strip()
+        )
+
+    return "\n\n".join(sections)
+
+
+def adaptive_planner_node(
+    state: ResearchState,
+) -> ResearchState:
+    """
+    Generate targeted follow-up research questions from
+    the current research gaps.
+    """
+
+    print(
+        "\n[Node] adaptive_planner"
+    )
+
+    research_gaps = state[
+        "research_gaps"
+    ]
+
+    if not research_gaps:
+
+        print(
+            "  No research gaps available."
+        )
+
+        return {
+            **state,
+            "research_complete": True,
+        }
+
+    print(
+        "  Research gaps identified: "
+        f"{len(research_gaps)}"
+    )
+
+    for gap in research_gaps:
+        print(
+            f"    - {gap}"
+        )
+
+    existing_questions = state[
+        "research_questions"
+    ]
+
+    try:
+
+        response = chain.invoke(
+            {
+                "question": state["question"],
+                "research_gaps": (
+                    _format_research_gaps(
+                        research_gaps
+                    )
+                ),
+                "existing_questions": (
+                    _format_existing_questions(
+                        existing_questions
+                    )
+                ),
+            }
+        )
+
+    except Exception as exc:
+
+        print(
+            "  Adaptive planning failed:"
+        )
+
+        print(
+            f"  {exc}"
+        )
+
+        return {
+            **state,
+            "research_complete": True,
+        }
+
+    follow_up_questions = (
+        response.research_questions[
+            :MAX_FOLLOW_UP_QUESTIONS
+        ]
+    )
+
+    if not follow_up_questions:
+
+        print(
+            "  No useful follow-up research "
+            "questions were generated."
+        )
+
+        return {
+            **state,
+            "research_complete": True,
+        }
+
+    print(
+        "  Follow-up questions generated: "
+        f"{len(follow_up_questions)}"
+    )
+
+    for index, question in enumerate(
+        follow_up_questions,
+        start=1,
+    ):
+        print()
+        print(
+            f"  [{index}] "
+            f"{question.question}"
+        )
+
+        print(
+            "      Search queries:"
+        )
+
+        for query in question.search_queries:
+            print(
+                f"        - {query}"
+            )
+
+    combined_questions = (
+        existing_questions
+        + follow_up_questions
+    )
+
+    return {
+        **state,
+        "research_questions": combined_questions,
+        "current_question_index": (
+            state["current_question_index"]
+        ),
+        "research_round": (
+            state["research_round"] + 1
+        ),
+        "research_complete": False,
+    }

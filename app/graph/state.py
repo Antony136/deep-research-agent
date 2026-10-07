@@ -26,12 +26,12 @@ class ResearchState(TypedDict):
     # RESEARCH PLAN
     research_questions: list[ResearchQuestion]
 
-    # RESEARCH DATA
-    sources: list[Source]
-
     # Sources belonging to the research question
     # currently being processed.
     current_sources: list[Source]
+
+    # RESEARCH DATA
+    sources: list[Source]
 
     # Evidence extracted by the LLM for the current
     # research question, before deterministic validation.
@@ -46,7 +46,24 @@ class ResearchState(TypedDict):
 
     research_complete: bool
 
-    # Adaptive research decision
+    # ADAPTIVE RESEARCH
+    #
+    # research_round = 1 means the initial research plan.
+    #
+    # If the initial plan is exhausted and the evidence is
+    # still insufficient, the adaptive planner can create a
+    # targeted follow-up plan and advance the round.
+    research_round: int
+
+    # Hard application-level limit preventing the agent
+    # from researching indefinitely.
+    max_research_rounds: int
+
+    # Information that the sufficiency evaluator determined
+    # is still missing from the research.
+    research_gaps: list[str]
+
+    # Sufficiency decision
     research_sufficient: bool
     research_decision_reason: str
 
