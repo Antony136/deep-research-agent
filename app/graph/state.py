@@ -46,5 +46,9 @@ class ResearchState(TypedDict):
 
     research_complete: bool
 
+    # Adaptive research decision
+    research_sufficient: bool
+    research_decision_reason: str
+
     # FINAL OUTPUT
     report: ResearchReport | None

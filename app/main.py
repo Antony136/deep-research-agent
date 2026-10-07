@@ -2,8 +2,8 @@
 Entry point for the Deep Research Agent.
 
 Runs the complete research workflow and displays
-the research plan, collected sources, and extracted
-evidence in a readable format.
+the research plan, collected sources, extracted
+evidence, and adaptive research decision.
 """
 
 from app.graph.graph import build_research_graph
@@ -15,9 +15,7 @@ def print_separator(char="=", width=80):
 
 def print_research_plan(research_questions):
     print_separator()
-
     print("RESEARCH PLAN")
-
     print_separator()
 
     print(
@@ -29,19 +27,15 @@ def print_research_plan(research_questions):
         research_questions,
         start=1,
     ):
-
         print()
         print(
             f"[{index}] "
             f"{research_question.question}"
         )
 
-        print(
-            "    Search queries:"
-        )
+        print("    Search queries:")
 
         for query in research_question.search_queries:
-
             print(
                 f"      - {query}"
             )
@@ -49,9 +43,7 @@ def print_research_plan(research_questions):
 
 def print_sources(sources):
     print_separator()
-
     print("COLLECTED SOURCES")
-
     print_separator()
 
     print(
@@ -63,15 +55,16 @@ def print_sources(sources):
         sources,
         start=1,
     ):
-
         print()
+
         print(
             f"[{index}] "
             f"{source.title or 'Untitled'}"
         )
 
         print(
-            f"    URL: {source.url}"
+            f"    URL: "
+            f"{source.url}"
         )
 
         print(
@@ -82,9 +75,7 @@ def print_sources(sources):
 
 def print_evidence(evidence):
     print_separator()
-
     print("EXTRACTED EVIDENCE")
-
     print_separator()
 
     print(
@@ -93,19 +84,15 @@ def print_evidence(evidence):
     )
 
     if not evidence:
-
-        print(
-            "\nNo evidence was extracted."
-        )
-
+        print("\nNo evidence was extracted.")
         return
 
     for index, item in enumerate(
         evidence,
         start=1,
     ):
-
         print()
+
         print(
             f"[{index}] CLAIM"
         )
@@ -115,6 +102,7 @@ def print_evidence(evidence):
         )
 
         print()
+
         print(
             "    SOURCE"
         )
@@ -124,6 +112,7 @@ def print_evidence(evidence):
         )
 
         print()
+
         print(
             "    SUPPORTING TEXT"
         )
@@ -133,12 +122,29 @@ def print_evidence(evidence):
         )
 
 
+def print_research_decision(state):
+    print_separator()
+    print("ADAPTIVE RESEARCH DECISION")
+    print_separator()
+
+    print(
+        "Research sufficient: "
+        f"{state['research_sufficient']}"
+    )
+
+    print()
+
+    print("Reason:")
+
+    print(
+        f"  {state['research_decision_reason']}"
+    )
+
+
 def main():
 
     print_separator()
-
     print("DEEP RESEARCH AGENT")
-
     print_separator()
 
     question = (
@@ -159,15 +165,14 @@ def main():
         "research_questions": [],
         "sources": [],
         "current_sources": [],
+        "pending_evidence": [],
         "evidence": [],
         "current_question_index": 0,
         "research_complete": False,
+        "research_sufficient": False,
+        "research_decision_reason": "",
         "report": None,
     }
-
-    # ------------------------------------------------------
-    # BUILD GRAPH
-    # ------------------------------------------------------
 
     print("\n")
     print("BUILDING RESEARCH GRAPH...")
@@ -178,34 +183,25 @@ def main():
         "Graph compiled successfully."
     )
 
-    # ------------------------------------------------------
-    # RUN RESEARCH
-    # ------------------------------------------------------
-
     print("\n")
+
     print_separator()
-
     print("STARTING RESEARCH")
-
     print_separator()
 
     final_state = graph.invoke(
         initial_state
     )
 
-    # ------------------------------------------------------
-    # DISPLAY PLAN
-    # ------------------------------------------------------
-
     print("\n")
+
+    # ------------------------------------------------------
+    # RESULTS
+    # ------------------------------------------------------
 
     print_research_plan(
         final_state["research_questions"]
     )
-
-    # ------------------------------------------------------
-    # DISPLAY SOURCES
-    # ------------------------------------------------------
 
     print("\n")
 
@@ -213,54 +209,62 @@ def main():
         final_state["sources"]
     )
 
-    # ------------------------------------------------------
-    # DISPLAY EVIDENCE
-    # ------------------------------------------------------
-
     print("\n")
 
     print_evidence(
         final_state["evidence"]
     )
 
-    # ------------------------------------------------------
-    # FINAL STATE
-    # ------------------------------------------------------
+    print("\n")
+
+    print_research_decision(
+        final_state
+    )
 
     print("\n")
 
+    # ------------------------------------------------------
+    # SUMMARY
+    # ------------------------------------------------------
+
     print_separator()
-
     print("RESEARCH WORKFLOW SUMMARY")
-
     print_separator()
 
     print(
-        f"Research questions: "
+        "Research questions: "
         f"{len(final_state['research_questions'])}"
     )
 
     print(
-        f"Sources collected: "
+        "Sources collected: "
         f"{len(final_state['sources'])}"
     )
 
     print(
-        f"Evidence items: "
+        "Evidence items: "
         f"{len(final_state['evidence'])}"
     )
 
     print(
-        f"Research complete: "
+        "Research questions processed: "
+        f"{final_state['current_question_index']}"
+    )
+
+    print(
+        "Research complete: "
         f"{final_state['research_complete']}"
     )
 
-    print_separator()
+    print(
+        "Research sufficient: "
+        f"{final_state['research_sufficient']}"
+    )
 
+    print_separator()
     print(
         "RESEARCH PIPELINE COMPLETED"
     )
-
     print_separator()
 
 

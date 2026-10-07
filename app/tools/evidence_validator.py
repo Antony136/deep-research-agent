@@ -7,50 +7,342 @@ grounded in the sources collected by the research system.
 The validator does not use an LLM. It performs deterministic
 checks before evidence is allowed to move further through
 the research pipeline.
+
+The matching logic is intentionally tolerant of common web
+extraction differences such as:
+
+- Unicode punctuation
+- HTML text formatting
+- Different whitespace
+- Line breaks
+- Line-break hyphenation
+- Minor text extraction differences
+
+It still requires strong textual overlap before evidence
+is considered grounded.
 """
 
 import re
+import unicodedata
 from difflib import SequenceMatcher
 
 from app.schemas.research import Evidence, Source
 
 
-# Minimum similarity required when the supporting text is not
-# an exact substring of the source content.
-MIN_SUPPORTING_TEXT_SIMILARITY = 0.75
+# Maximum supporting passage length accepted for fuzzy matching.
+MAX_SUPPORTING_TEXT_LENGTH = 2000
+
+# Minimum similarity required by the fuzzy fallback.
+MIN_FUZZY_SIMILARITY = 0.85
+
+# Minimum token overlap required by the fuzzy fallback.
+MIN_TOKEN_OVERLAP = 0.80
 
 
 def _normalize_text(text: str) -> str:
     """
-    Normalize text for comparison.
+    Normalize extracted web text for comparison.
 
-    This removes differences caused by:
-    - whitespace
-    - line breaks
-    - repeated spaces
-    - capitalization
-    - simple surrounding punctuation
+    This does not modify the stored evidence. It only creates
+    a comparison-friendly representation.
     """
+
+    text = unicodedata.normalize(
+        "NFKC",
+        text,
+    )
+
+    # Remove soft hyphens.
+    text = text.replace(
+        "\u00ad",
+        "",
+    )
+
+    # Normalize common Unicode dash characters.
+    text = re.sub(
+        r"[\u2010\u2011\u2012\u2013\u2014\u2212]",
+        "-",
+        text,
+    )
+
+    # Join words that were split across a line by a hyphen.
+    #
+    # Example:
+    #
+    #   produc-
+    #   tion
+    #
+    # becomes:
+    #
+    #   production
+    #
+    text = re.sub(
+        r"(?<=\w)-\s+(?=\w)",
+        "",
+        text,
+    )
 
     text = text.lower()
 
+    # Replace punctuation with spaces.
+    text = re.sub(
+        r"[^\w\s]",
+        " ",
+        text,
+    )
+
+    # Collapse whitespace.
     text = re.sub(
         r"\s+",
         " ",
         text,
     )
 
-    text = text.strip()
+    return text.strip()
 
-    return text
+
+def _tokenize(text: str) -> list[str]:
+    """
+    Convert normalized text into word-like tokens.
+    """
+
+    normalized = _normalize_text(text)
+
+    if not normalized:
+        return []
+
+    return re.findall(
+        r"\b\w+\b",
+        normalized,
+    )
 
 
 def _url_key(url: str) -> str:
     """
-    Normalize a URL for basic comparison.
+    Normalize URLs for deterministic comparison.
     """
 
     return url.strip().rstrip("/").lower()
+
+
+def _exact_match(
+    supporting_text: str,
+    source_content: str,
+) -> bool:
+    """
+    Check whether the normalized supporting text appears
+    directly inside the normalized source content.
+    """
+
+    normalized_support = _normalize_text(
+        supporting_text
+    )
+
+    normalized_source = _normalize_text(
+        source_content
+    )
+
+    if not normalized_support:
+        return False
+
+    if not normalized_source:
+        return False
+
+    return normalized_support in normalized_source
+
+
+def _token_sequence_match(
+    supporting_text: str,
+    source_content: str,
+) -> bool:
+    """
+    Check whether the supporting text appears as an exact
+    sequence of normalized tokens in the source.
+
+    This handles cases where punctuation or formatting differs
+    but the actual words are preserved.
+    """
+
+    support_tokens = _tokenize(
+        supporting_text
+    )
+
+    source_tokens = _tokenize(
+        source_content
+    )
+
+    if not support_tokens:
+        return False
+
+    if len(support_tokens) > len(source_tokens):
+        return False
+
+    support_length = len(support_tokens)
+
+    first_token = support_tokens[0]
+
+    candidate_positions = [
+        index
+        for index, token in enumerate(source_tokens)
+        if token == first_token
+    ]
+
+    for start in candidate_positions:
+
+        end = start + support_length
+
+        if end > len(source_tokens):
+            continue
+
+        if (
+            source_tokens[start:end]
+            == support_tokens
+        ):
+            return True
+
+    return False
+
+
+def _calculate_token_overlap(
+    supporting_tokens: list[str],
+    source_tokens: list[str],
+) -> float:
+    """
+    Calculate how many supporting-text tokens are represented
+    in a source chunk.
+
+    Duplicate tokens are intentionally preserved because
+    repeated words can be meaningful in a passage.
+    """
+
+    if not supporting_tokens:
+        return 0.0
+
+    source_token_set = set(
+        source_tokens
+    )
+
+    matched_tokens = sum(
+        1
+        for token in supporting_tokens
+        if token in source_token_set
+    )
+
+    return (
+        matched_tokens
+        / len(supporting_tokens)
+    )
+
+
+def _fuzzy_match(
+    supporting_text: str,
+    source_content: str,
+) -> bool:
+    """
+    Perform a conservative fuzzy comparison.
+
+    The source is examined in windows approximately the same
+    size as the supporting passage.
+
+    A match requires BOTH:
+
+    - sufficiently high character similarity
+    - sufficiently high token overlap
+
+    This prevents weak partial matches from being accepted.
+    """
+
+    normalized_support = _normalize_text(
+        supporting_text
+    )
+
+    normalized_source = _normalize_text(
+        source_content
+    )
+
+    if not normalized_support:
+        return False
+
+    if not normalized_source:
+        return False
+
+    if len(normalized_support) > MAX_SUPPORTING_TEXT_LENGTH:
+        return False
+
+    support_tokens = _tokenize(
+        normalized_support
+    )
+
+    source_tokens = _tokenize(
+        normalized_source
+    )
+
+    if not support_tokens:
+        return False
+
+    support_token_count = len(
+        support_tokens
+    )
+
+    if support_token_count > len(source_tokens):
+        return False
+
+    # Search token-based windows rather than every character
+    # position. This keeps validation reasonably efficient
+    # for large web pages.
+    window_size = support_token_count
+
+    # Small overlap between windows prevents a relevant passage
+    # from falling between two windows.
+    step = max(
+        window_size // 3,
+        10,
+    )
+
+    for start in range(
+        0,
+        len(source_tokens),
+        step,
+    ):
+        end = start + window_size
+
+        if end > len(source_tokens):
+            break
+
+        source_window_tokens = (
+            source_tokens[start:end]
+        )
+
+        token_overlap = (
+            _calculate_token_overlap(
+                support_tokens,
+                source_window_tokens,
+            )
+        )
+
+        if (
+            token_overlap
+            < MIN_TOKEN_OVERLAP
+        ):
+            continue
+
+        source_window = " ".join(
+            source_window_tokens
+        )
+
+        similarity = SequenceMatcher(
+            None,
+            normalized_support,
+            source_window,
+        ).ratio()
+
+        if (
+            similarity
+            >= MIN_FUZZY_SIMILARITY
+        ):
+            return True
+
+    return False
 
 
 def _supporting_text_exists(
@@ -58,78 +350,42 @@ def _supporting_text_exists(
     source_content: str,
 ) -> bool:
     """
-    Check whether supporting text appears in the source.
+    Determine whether supporting text can be grounded
+    in the source content.
 
-    First performs an exact normalized substring check.
+    Matching is attempted from strongest to weakest:
 
-    If that fails, performs a conservative similarity check
-    against source content windows.
+    1. Normalized exact substring
+    2. Exact normalized token sequence
+    3. Conservative fuzzy token/character matching
     """
 
-    supporting_text = _normalize_text(
-        supporting_text
-    )
-
-    source_content = _normalize_text(
-        source_content
-    )
-
-    if not supporting_text or not source_content:
+    if not supporting_text.strip():
         return False
 
-    # ------------------------------------------------------
-    # Exact normalized match
-    # ------------------------------------------------------
+    if not source_content.strip():
+        return False
 
-    if supporting_text in source_content:
+    # Strongest check.
+    if _exact_match(
+        supporting_text,
+        source_content,
+    ):
         return True
 
-    # ------------------------------------------------------
-    # Similarity fallback
-    # ------------------------------------------------------
-
-    # Avoid expensive comparison for extremely large text.
-    # Supporting passages are expected to be relatively short.
-    if len(supporting_text) > 2000:
-        return False
-
-    target_length = len(
-        supporting_text
-    )
-
-    # Compare against windows approximately the same size
-    # as the claimed supporting passage.
-    window_size = max(
-        target_length,
-        100,
-    )
-
-    step = max(
-        window_size // 3,
-        50,
-    )
-
-    for start in range(
-        0,
-        len(source_content),
-        step,
+    # Handles punctuation and formatting differences.
+    if _token_sequence_match(
+        supporting_text,
+        source_content,
     ):
+        return True
 
-        window = source_content[
-            start:start + window_size
-        ]
-
-        if not window:
-            break
-
-        similarity = SequenceMatcher(
-            None,
-            supporting_text,
-            window,
-        ).ratio()
-
-        if similarity >= MIN_SUPPORTING_TEXT_SIMILARITY:
-            return True
+    # Conservative fallback for small extraction differences.
+    if _fuzzy_match(
+        supporting_text,
+        source_content,
+    ):
+        return True
 
     return False
 
@@ -139,42 +395,31 @@ def validate_evidence(
     sources: list[Source],
 ) -> tuple[bool, str]:
     """
-    Validate one evidence item against collected sources.
+    Validate a single evidence item.
 
-    Returns:
+    Evidence is considered valid only when:
 
-        (True, reason)
-        (False, reason)
+    - claim exists
+    - source URL exists
+    - supporting text exists
+    - cited URL belongs to a collected source
+    - supporting text can be grounded in that source
     """
 
-    # ------------------------------------------------------
-    # 1. Basic evidence validation
-    # ------------------------------------------------------
-
     if not evidence.claim.strip():
-
-        return (
-            False,
-            "Evidence claim is empty.",
+        return False, (
+            "Evidence claim is empty."
         )
 
     if not evidence.source_url.strip():
-
-        return (
-            False,
-            "Evidence source URL is empty.",
+        return False, (
+            "Evidence source URL is empty."
         )
 
     if not evidence.supporting_text.strip():
-
-        return (
-            False,
-            "Evidence supporting text is empty.",
+        return False, (
+            "Evidence supporting text is empty."
         )
-
-    # ------------------------------------------------------
-    # 2. Verify source URL
-    # ------------------------------------------------------
 
     evidence_url = _url_key(
         evidence.source_url
@@ -190,31 +435,22 @@ def validate_evidence(
     )
 
     if source is None:
-
-        return (
-            False,
+        return False, (
             "Evidence references a source URL "
-            "that was not collected.",
+            "that was not collected."
         )
-
-    # ------------------------------------------------------
-    # 3. Verify supporting text
-    # ------------------------------------------------------
 
     if not _supporting_text_exists(
-        evidence.supporting_text,
-        source.content,
+        supporting_text=evidence.supporting_text,
+        source_content=source.content,
     ):
-
-        return (
-            False,
-            "Supporting text could not be "
-            "matched to the cited source.",
+        return False, (
+            "Supporting text could not be matched "
+            "strongly enough to the cited source."
         )
 
-    return (
-        True,
-        "Evidence is grounded in the cited source.",
+    return True, (
+        "Evidence is grounded in the cited source."
     )
 
 
@@ -226,16 +462,17 @@ def validate_evidence_batch(
     list[tuple[Evidence, str]],
 ]:
     """
-    Validate a collection of evidence items.
+    Validate multiple evidence items.
 
     Returns:
 
-        valid_evidence
-        rejected_evidence
+        (
+            valid_evidence,
+            rejected_evidence,
+        )
 
-    Rejected evidence is retained together with the reason
-    so that the system can later expose verification failures
-    during debugging or evaluation.
+    Rejected evidence includes the original evidence item
+    together with the deterministic rejection reason.
     """
 
     valid_evidence = []
@@ -250,13 +487,11 @@ def validate_evidence_batch(
         )
 
         if valid:
-
             valid_evidence.append(
                 evidence
             )
 
         else:
-
             rejected_evidence.append(
                 (
                     evidence,
