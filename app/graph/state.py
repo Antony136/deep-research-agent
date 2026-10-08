@@ -87,7 +87,7 @@ class ResearchState(TypedDict):
     #
     #   Initial plan       = 5 questions
     #   Adaptive additions = up to 3 questions
-    #   Total              = 8 questions maximum
+    #   Total              = 10 questions maximum
     #
     # This prevents research from expanding indefinitely
     # through repeated adaptive planning.

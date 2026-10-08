@@ -1,8 +1,11 @@
 """
 Entry point for the Deep Research Agent.
 
-Runs the complete research workflow and displays
-a concise summary of the final research state.
+Runs the complete research workflow and displays:
+- research progress summary
+- research decision
+- unresolved research gaps
+- final generated research report
 """
 
 from app.graph.graph import build_research_graph
@@ -49,7 +52,6 @@ def print_research_decision(
     research_gaps = state["research_gaps"]
 
     if research_gaps:
-
         print()
         print("Research gaps:")
 
@@ -57,7 +59,6 @@ def print_research_decision(
             print(f"- {gap}")
 
     else:
-
         print()
         print("Research gaps: None")
 
@@ -105,6 +106,87 @@ def print_summary(
     )
 
 
+def print_final_report(
+    state,
+):
+    print_separator()
+    print("FINAL RESEARCH REPORT")
+    print_separator()
+
+    report = state.get("report")
+
+    if report is None:
+        print(
+            "No final research report was generated."
+        )
+        return
+
+    # --------------------------------------------------------
+    # TITLE
+    # --------------------------------------------------------
+
+    print(
+        f"\nTitle:\n"
+        f"{report.title}"
+    )
+
+    # --------------------------------------------------------
+    # SUMMARY
+    # --------------------------------------------------------
+
+    print(
+        f"\nSummary:\n"
+        f"{report.summary}"
+    )
+
+    # --------------------------------------------------------
+    # FINDINGS
+    # --------------------------------------------------------
+
+    print(
+        "\nFindings:"
+    )
+
+    for index, finding in enumerate(
+        report.findings,
+        start=1,
+    ):
+        print(
+            f"\n[{index}]"
+        )
+        print(finding)
+
+    # --------------------------------------------------------
+    # SOURCES
+    # --------------------------------------------------------
+
+    print(
+        "\nSources:"
+    )
+
+    for index, source in enumerate(
+        report.sources,
+        start=1,
+    ):
+        print(
+            f"[{index}] {source}"
+        )
+
+    # --------------------------------------------------------
+    # RAW REPORT OBJECT
+    # --------------------------------------------------------
+
+    print_separator(
+        char="-"
+    )
+
+    print(
+        "FINAL REPORT OBJECT:"
+    )
+
+    print(report)
+
+
 def main():
 
     print_separator()
@@ -112,11 +194,10 @@ def main():
     print_separator()
 
     question = (
-        "How has the performance of open-source large "
-        "language models changed from 2023 to 2026, and "
-        "which models currently provide the best balance "
-        "of reasoning ability, coding performance, and "
-        "local hardware requirements?"
+        "What are the most effective approaches for "
+        "improving retrieval quality in RAG systems, "
+        "and how do vector search, reranking, and "
+        "hybrid retrieval compare?"
     )
 
     print("\nUSER QUESTION")
@@ -130,54 +211,26 @@ def main():
     initial_state = {
         "question": question,
 
-        # --------------------------------------------------
-        # RESEARCH PLAN
-        # --------------------------------------------------
-
         "research_questions": [],
-
-        # --------------------------------------------------
-        # CURRENT RESEARCH QUESTION
-        # --------------------------------------------------
 
         "active_research_question": None,
         "active_research_question_number": None,
-
-        # --------------------------------------------------
-        # RESEARCH DATA
-        # --------------------------------------------------
 
         "sources": [],
         "current_sources": [],
         "pending_evidence": [],
         "evidence": [],
 
-        # --------------------------------------------------
-        # WORKFLOW CONTROL
-        # --------------------------------------------------
-
         "current_question_index": 0,
         "research_complete": False,
 
-        # --------------------------------------------------
-        # ADAPTIVE RESEARCH
-        # --------------------------------------------------
-
         "research_round": 1,
         "max_research_rounds": 3,
-        "max_total_research_questions": 8,
-
-        # --------------------------------------------------
-        # SUFFICIENCY
-        # --------------------------------------------------
+        "max_total_research_questions": 10,
 
         "research_gaps": [],
         "research_sufficient": False,
         "research_decision_reason": "",
-
-        # --------------------------------------------------
-        # FINAL OUTPUT
-        # --------------------------------------------------
 
         "report": None,
     }
@@ -237,6 +290,12 @@ def main():
     print()
 
     print_summary(
+        final_state
+    )
+
+    print()
+
+    print_final_report(
         final_state
     )
 

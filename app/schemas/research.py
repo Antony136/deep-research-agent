@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field
 class ResearchQuestion(BaseModel):
     """
     A single question that the research agent must investigate.
+
+    A research question may either be an original question
+    created by the planner or a follow-up question created
+    by the adaptive research planner.
     """
 
     question: str = Field(
@@ -20,6 +24,15 @@ class ResearchQuestion(BaseModel):
     search_queries: list[str] = Field(
         default_factory=list,
         description="Search queries that can help answer the question.",
+    )
+
+    parent_question_number: int | None = Field(
+        default=None,
+        description=(
+            "1-based number of the original research question "
+            "that this question is a follow-up to. "
+            "None for original planner questions."
+        ),
     )
 
 

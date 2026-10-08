@@ -30,20 +30,38 @@ Researcher       Is research sufficient?
    |              /              \
    |            yes               no
    |             |                 |
-   |            END        Adaptive Planner
-   |                               |
-   |                               v
-   |                        Follow-up questions?
-   |                         /             \
-   |                       yes              no
-   |                        |                |
-   |                        v                v
-   |                   Researcher          END
-   |                        |
-   └────────────────────────┘
+   |             |          Budget / round available?
+   |             |             /          \
+   |             |           yes            no
+   |             |            |              |
+   |             |            v              |
+   |             |      Adaptive Planner     |
+   |             |            |              |
+   |             |            v              |
+   |             |       Follow-up questions?|
+   |             |          /       \         |
+   |             |        yes        no       |
+   |             |         |          |       |
+   |             └─────────┘          |       |
+   |                                  |       |
+   └──────────────────────────────────┘       |
+                                              |
+                         ┌────────────────────┘
+                         |
+                         v
+                    FINAL SYNTHESIS
+                         |
+                         v
+                        END
 
-The workflow also enforces an absolute research-question
-budget so adaptive research cannot expand indefinitely.
+The research phase may finish because:
+- all required evidence was collected,
+- the research-question budget was reached,
+- the research-round limit was reached, or
+- adaptive planning produced no additional questions.
+
+Regardless of why research ends, the verified evidence is passed
+to the final synthesis node.
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -53,7 +71,10 @@ from app.graph.nodes.evidence_extractor import evidence_extractor_node
 from app.graph.nodes.evidence_verifier import evidence_verifier_node
 from app.graph.nodes.planner import planner_node
 from app.graph.nodes.researcher import researcher_node
-from app.graph.nodes.research_sufficiency import research_sufficiency_node
+from app.graph.nodes.research_sufficiency import (
+    research_sufficiency_node,
+)
+from app.graph.nodes.synthesizer import synthesis_node
 from app.graph.state import ResearchState
 
 
@@ -68,7 +89,7 @@ def should_continue_research(
 
     Once the planned research is exhausted:
 
-        sufficient -> END
+        sufficient -> synthesis
         insufficient -> adaptive planner
 
     Adaptive research is allowed only while the absolute
@@ -102,7 +123,7 @@ def should_continue_research(
 
     # ------------------------------------------------------
     # 2. The planned research is exhausted.
-    #    Now evaluate research sufficiency.
+    #    If sufficient, move directly to synthesis.
     # ------------------------------------------------------
 
     if state["research_sufficient"]:
@@ -117,16 +138,18 @@ def should_continue_research(
         )
 
         print(
-            "[Router] Ending research."
+            "[Router] Moving to final synthesis."
         )
 
-        return "end"
+        return "synthesis"
 
     # ------------------------------------------------------
     # 3. Hard total-question budget.
     #
     # No additional research can be started once the
     # absolute question budget has been consumed.
+    #
+    # The current evidence is still passed to synthesis.
     # ------------------------------------------------------
 
     if total_questions >= max_total_questions:
@@ -147,10 +170,15 @@ def should_continue_research(
         )
 
         print(
-            "[Router] Ending research with the current evidence."
+            "[Router] Ending research phase."
         )
 
-        return "end"
+        print(
+            "[Router] Moving to final synthesis with "
+            "the current verified evidence."
+        )
+
+        return "synthesis"
 
     # ------------------------------------------------------
     # 4. Planned research is exhausted but evidence
@@ -190,6 +218,8 @@ def should_continue_research(
 
     # ------------------------------------------------------
     # 5. Research-round safety limit reached.
+    #
+    # Move to synthesis rather than ending the application.
     # ------------------------------------------------------
 
     print(
@@ -197,10 +227,15 @@ def should_continue_research(
     )
 
     print(
-        "[Router] Ending research with the current evidence."
+        "[Router] Ending research phase."
     )
 
-    return "end"
+    print(
+        "[Router] Moving to final synthesis with "
+        "the current verified evidence."
+    )
+
+    return "synthesis"
 
 
 def should_continue_after_adaptive_planner(
@@ -233,10 +268,14 @@ def should_continue_after_adaptive_planner(
         )
 
         print(
-            "[Router] Ending research with the current evidence."
+            "[Router] Ending research phase."
         )
 
-        return "end"
+        print(
+            "[Router] Moving to final synthesis."
+        )
+
+        return "synthesis"
 
     # ------------------------------------------------------
     # 2. Enforce the absolute question budget.
@@ -263,11 +302,15 @@ def should_continue_after_adaptive_planner(
         )
 
         print(
-            "[Router] Ending research before processing "
-            "additional questions."
+            "[Router] Ending research phase."
         )
 
-        return "end"
+        print(
+            "[Router] Moving to final synthesis with "
+            "the current verified evidence."
+        )
+
+        return "synthesis"
 
     # ------------------------------------------------------
     # 3. Valid adaptive questions exist.
@@ -327,6 +370,11 @@ def build_research_graph():
         adaptive_planner_node,
     )
 
+    graph.add_node(
+        "synthesizer",
+        synthesis_node,
+    )
+
     # ------------------------------------------------------
     # Main workflow
     # ------------------------------------------------------
@@ -366,7 +414,7 @@ def build_research_graph():
         {
             "research": "researcher",
             "adaptive_planner": "adaptive_planner",
-            "end": END,
+            "synthesis": "synthesizer",
         },
     )
 
@@ -379,8 +427,17 @@ def build_research_graph():
         should_continue_after_adaptive_planner,
         {
             "research": "researcher",
-            "end": END,
+            "synthesis": "synthesizer",
         },
+    )
+
+    # ------------------------------------------------------
+    # Final synthesis
+    # ------------------------------------------------------
+
+    graph.add_edge(
+        "synthesizer",
+        END,
     )
 
     return graph.compile()
