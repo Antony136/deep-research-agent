@@ -41,6 +41,9 @@ Researcher       Is research sufficient?
    |                   Researcher          END
    |                        |
    └────────────────────────┘
+
+The workflow also enforces an absolute research-question
+budget so adaptive research cannot expand indefinitely.
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -54,26 +57,27 @@ from app.graph.nodes.research_sufficiency import research_sufficiency_node
 from app.graph.state import ResearchState
 
 
-def should_continue_research(state: ResearchState) -> str:
+def should_continue_research(
+    state: ResearchState,
+) -> str:
     """
-    Decide what should happen after research sufficiency evaluation.
+    Decide what should happen after research sufficiency
+    evaluation.
 
     The original research plan always has priority.
-
-    Planned questions must be processed before the sufficiency
-    evaluator is allowed to terminate the workflow.
 
     Once the planned research is exhausted:
 
         sufficient -> END
         insufficient -> adaptive planner
 
-    This prevents the LLM sufficiency evaluator from ending
-    research prematurely after seeing only part of the plan.
+    Adaptive research is allowed only while the absolute
+    research-question budget has not been reached.
     """
 
     current_index = state["current_question_index"]
     total_questions = len(state["research_questions"])
+    max_total_questions = state["max_total_research_questions"]
 
     # ------------------------------------------------------
     # 1. Complete the existing research plan first.
@@ -119,11 +123,50 @@ def should_continue_research(state: ResearchState) -> str:
         return "end"
 
     # ------------------------------------------------------
-    # 3. Planned research is exhausted but evidence
+    # 3. Hard total-question budget.
+    #
+    # No additional research can be started once the
+    # absolute question budget has been consumed.
+    # ------------------------------------------------------
+
+    if total_questions >= max_total_questions:
+
+        print(
+            "\n[Router] Maximum research-question budget "
+            "has been reached."
+        )
+
+        print(
+            f"[Router] Questions in plan: "
+            f"{total_questions}"
+        )
+
+        print(
+            f"[Router] Maximum allowed: "
+            f"{max_total_questions}"
+        )
+
+        print(
+            "[Router] Ending research with the current evidence."
+        )
+
+        return "end"
+
+    # ------------------------------------------------------
+    # 4. Planned research is exhausted but evidence
     #    is still insufficient.
+    #
+    # Adaptive planning is allowed only if both:
+    #
+    #   - the research-round limit allows another round
+    #   - the total-question budget has capacity
     # ------------------------------------------------------
 
     if state["research_round"] < state["max_research_rounds"]:
+
+        remaining_capacity = (
+            max_total_questions - total_questions
+        )
 
         print(
             "\n[Router] All planned research questions "
@@ -138,10 +181,15 @@ def should_continue_research(state: ResearchState) -> str:
             "[Router] Starting adaptive planning."
         )
 
+        print(
+            f"[Router] Remaining question capacity: "
+            f"{remaining_capacity}"
+        )
+
         return "adaptive_planner"
 
     # ------------------------------------------------------
-    # 4. Safety limit reached.
+    # 5. Research-round safety limit reached.
     # ------------------------------------------------------
 
     print(
@@ -161,40 +209,85 @@ def should_continue_after_adaptive_planner(
     """
     Decide what should happen after adaptive planning.
 
-    If the adaptive planner generated new research questions,
-    continue with the researcher.
+    The adaptive planner may add follow-up questions.
 
-    If it failed to generate useful follow-up questions,
-    terminate the workflow instead of sending an old question
-    back to the researcher.
+    The absolute question budget is checked again here so
+    the researcher can never receive more questions than
+    the configured application limit.
     """
 
     questions = state["research_questions"]
     current_index = state["current_question_index"]
+    max_total_questions = state["max_total_research_questions"]
 
-    if current_index < len(questions):
+    # ------------------------------------------------------
+    # 1. Check whether the adaptive planner actually added
+    #    usable questions.
+    # ------------------------------------------------------
+
+    if current_index >= len(questions):
 
         print(
             "\n[Router] Adaptive planner created "
-            "new research questions."
+            "no new research questions."
         )
 
         print(
-            "[Router] Continuing with researcher."
+            "[Router] Ending research with the current evidence."
         )
 
-        return "research"
+        return "end"
+
+    # ------------------------------------------------------
+    # 2. Enforce the absolute question budget.
+    #
+    # This protects the workflow even if an adaptive planner
+    # implementation accidentally creates too many questions.
+    # ------------------------------------------------------
+
+    if len(questions) > max_total_questions:
+
+        print(
+            "\n[Router] Adaptive planner exceeded the "
+            "research-question budget."
+        )
+
+        print(
+            f"[Router] Generated questions: "
+            f"{len(questions)}"
+        )
+
+        print(
+            f"[Router] Maximum allowed: "
+            f"{max_total_questions}"
+        )
+
+        print(
+            "[Router] Ending research before processing "
+            "additional questions."
+        )
+
+        return "end"
+
+    # ------------------------------------------------------
+    # 3. Valid adaptive questions exist.
+    # ------------------------------------------------------
 
     print(
         "\n[Router] Adaptive planner created "
-        "no new research questions."
+        "new research questions."
     )
 
     print(
-        "[Router] Ending research with the current evidence."
+        "[Router] Continuing with researcher."
     )
 
-    return "end"
+    print(
+        f"[Router] Total questions in plan: "
+        f"{len(questions)}/{max_total_questions}"
+    )
+
+    return "research"
 
 
 def build_research_graph():

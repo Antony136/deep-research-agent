@@ -17,7 +17,9 @@ Evidence ownership is explicit:
           ↓
     Relevance filtering
           ↓
-    LLM coverage evaluation
+    Requirement coverage evaluation
+          ↓
+    Research gaps
 
 Evidence numbering is GLOBAL and remains stable across the
 entire research session.
@@ -55,6 +57,7 @@ BASE_URL = os.getenv(
 
 MAX_EVIDENCE_PER_QUESTION = 8
 MIN_TOKEN_OVERLAP = 0.08
+MAX_REQUIREMENTS_PER_QUESTION = 5
 
 
 # ------------------------------------------------------------
@@ -62,32 +65,66 @@ MIN_TOKEN_OVERLAP = 0.08
 # ------------------------------------------------------------
 
 
-class CoverageAssessment(BaseModel):
+class RequirementAssessment(BaseModel):
     """
-    Evidence mapping for one research question.
+    Coverage assessment for one factual requirement.
+
+    The requirement text is kept together with its coverage
+    decision so Python does not need to compare independently
+    generated strings from the LLM.
     """
+
+    requirement: str = Field(
+        description=(
+            "One concrete factual requirement that must be "
+            "established to adequately answer the research "
+            "question."
+        )
+    )
+
+    covered: bool = Field(
+        description=(
+            "True only when the supplied verified evidence "
+            "directly supports this requirement."
+        )
+    )
 
     evidence_numbers: list[int] = Field(
         default_factory=list,
         description=(
-            "GLOBAL 1-based numbers of verified evidence "
-            "items that directly support this research "
-            "question."
-        ),
+            "GLOBAL 1-based evidence numbers that directly "
+            "support this requirement."
+        )
     )
 
-    missing_information: str = Field(
+    reason: str = Field(
         default="",
         description=(
-            "Specific information still required to answer "
-            "the research question."
-        ),
+            "Brief explanation of why the supplied evidence "
+            "does or does not support this requirement."
+        )
+    )
+
+
+class CoverageAssessment(BaseModel):
+    """
+    Requirement-level evidence coverage for one research
+    question.
+    """
+
+    requirements: list[RequirementAssessment] = Field(
+        default_factory=list,
+        description=(
+            "Important factual requirements needed to answer "
+            "the research question and their evidence coverage."
+        )
     )
 
 
 # ------------------------------------------------------------
 # Model
 # ------------------------------------------------------------
+
 
 model = ChatOllama(
     model=MODEL_NAME,
@@ -114,60 +151,79 @@ prompt = ChatPromptTemplate.from_messages(
 You are the evidence coverage evaluator of a deep
 research agent.
 
-Your task is to determine which VERIFIED EVIDENCE items
-directly support ONE research question.
+Your task is to determine whether VERIFIED EVIDENCE
+adequately covers the important factual requirements
+needed to answer ONE research question.
 
-You are NOT answering the question.
+You are NOT writing the final answer.
 
 Use ONLY the supplied evidence.
 
 IMPORTANT RULES:
 
-1. Only select evidence that directly helps answer the
-   research question.
+1. First identify the important factual requirements
+   needed to answer the research question.
 
-2. Do NOT select evidence merely because it mentions the
-   same company, framework, or general topic.
+2. Break the research question into a small number of
+   concrete answer requirements.
 
-3. Read both the CLAIM and SUPPORTING TEXT.
+3. Create no more than 5 requirements.
 
-4. The evidence number is a GLOBAL evidence number.
-   Preserve the exact numbers supplied in the input.
+4. Requirements must represent distinct information
+   that a good answer should establish.
 
-5. Do not invent evidence numbers.
+5. Do not create unnecessary or overly detailed
+   requirements.
 
-6. Do not modify evidence numbers.
+6. Do not invent requirements unrelated to the research
+   question.
 
-7. An evidence item can be selected only when its actual
-   content contributes useful information to the question.
+7. Evaluate EVERY requirement against the supplied
+   VERIFIED EVIDENCE.
 
-8. For strengths/weaknesses questions, select evidence
-   describing actual strengths, limitations, tradeoffs,
-   adoption concerns, reliability concerns, or similar
-   characteristics.
+8. Set covered=true ONLY when the supplied evidence
+   directly supports the requirement.
 
-9. For comparison questions, select evidence containing
-   actual differences, capabilities, architecture,
-   workflow, or tradeoffs between the relevant systems.
+9. Set covered=false when the evidence is insufficient,
+   indirect, unrelated, or only partially supports the
+   requirement.
 
-10. For real-world/case-study questions, select evidence
-    describing actual deployments, customers, applications,
-    use cases, or case studies.
+10. One evidence item may support multiple requirements.
 
-11. If the available evidence does not adequately answer
-    the question, return an empty evidence_numbers list.
+11. Do not mark a requirement as covered merely because
+    an evidence item is generally related to the topic.
 
-12. When evidence_numbers is empty, explain specifically
-    what information is still missing.
+12. Read BOTH the CLAIM and SUPPORTING TEXT.
 
-13. Do NOT use outside knowledge.
+13. evidence_numbers must contain only GLOBAL evidence
+    numbers supplied in the input.
 
-14. Do NOT infer facts that are not supported by the
+14. Do not invent evidence numbers.
+
+15. Do not modify evidence numbers.
+
+16. If covered=true, provide the evidence numbers that
+    directly support that requirement.
+
+17. If covered=false, evidence_numbers should normally be
+    empty.
+
+18. Do not use outside knowledge.
+
+19. Do not infer facts that are not supported by the
     supplied evidence.
 
-15. Prefer direct evidence over indirect evidence.
+20. Keep each requirement specific and actionable.
 
-Return only the requested structured output.
+21. Do not turn missing requirements into broad new
+    research topics.
+
+22. Keep the number of requirements small.
+
+23. Return one RequirementAssessment for every important
+    requirement you identify.
+
+24. Return only the requested structured output.
 """,
         ),
         (
@@ -188,8 +244,24 @@ VERIFIED EVIDENCE CANDIDATES:
 {evidence}
 
 
-Determine which GLOBAL evidence numbers directly support
-this research question.
+Evaluate the evidence coverage for this research question.
+
+First identify the important factual requirements.
+
+Then evaluate every requirement independently.
+
+For each requirement:
+
+- State the requirement.
+- Decide whether it is directly supported.
+- If covered, provide the GLOBAL evidence numbers.
+- If not covered, leave evidence_numbers empty.
+- Give a short reason.
+
+Do not evaluate based on outside knowledge.
+Use only the supplied verified evidence.
+
+Return only the requested structured output.
 """,
         ),
     ]
@@ -264,71 +336,6 @@ def _evidence_relevance_score(
     return overlap
 
 
-def _select_candidate_evidence(
-    question: ResearchQuestion,
-    evidence: list[Evidence],
-) -> list[tuple[int, Evidence]]:
-    """
-    Select a small set of potentially relevant evidence items.
-
-    The evidence passed into this function MUST already belong
-    to the current research question.
-
-    Evidence numbers remain GLOBAL.
-
-    Returns:
-
-        [
-            (1, Evidence(...)),
-            (7, Evidence(...)),
-            ...
-        ]
-    """
-
-    question_tokens = _question_tokens(question)
-
-    scored = []
-
-    for index, item in enumerate(
-        evidence,
-        start=1,
-    ):
-
-        score = _evidence_relevance_score(
-            question_tokens=question_tokens,
-            evidence=item,
-        )
-
-        if score >= MIN_TOKEN_OVERLAP:
-
-            scored.append(
-                (
-                    score,
-                    index,
-                    item,
-                )
-            )
-
-    scored.sort(
-        key=lambda value: (
-            -value[0],
-            value[1],
-        )
-    )
-
-    selected = scored[
-        :MAX_EVIDENCE_PER_QUESTION
-    ]
-
-    return [
-        (
-            index,
-            item,
-        )
-        for _, index, item in selected
-    ]
-
-
 # ------------------------------------------------------------
 # Formatting
 # ------------------------------------------------------------
@@ -376,8 +383,8 @@ def _normalize_evidence_numbers(
     candidate_numbers: set[int],
 ) -> list[int]:
     """
-    Keep only valid GLOBAL evidence numbers that were actually
-    supplied to the LLM.
+    Keep only valid GLOBAL evidence numbers that were
+    actually supplied to the LLM.
     """
 
     normalized = []
@@ -389,6 +396,59 @@ def _normalize_evidence_numbers(
             and number not in normalized
         ):
             normalized.append(number)
+
+    return normalized
+
+
+def _normalize_requirement(
+    requirement: str,
+) -> str:
+    """
+    Normalize a single requirement description.
+    """
+
+    return " ".join(
+        requirement.strip().split()
+    )
+
+
+def _deduplicate_requirements(
+    requirements: list[RequirementAssessment],
+) -> list[RequirementAssessment]:
+    """
+    Normalize and deduplicate requirement assessments.
+    """
+
+    normalized = []
+    seen = set()
+
+    for assessment in requirements:
+
+        requirement = _normalize_requirement(
+            assessment.requirement
+        )
+
+        if not requirement:
+            continue
+
+        key = requirement.lower()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        normalized.append(
+            RequirementAssessment(
+                requirement=requirement,
+                covered=assessment.covered,
+                evidence_numbers=assessment.evidence_numbers,
+                reason=assessment.reason.strip(),
+            )
+        )
+
+        if len(normalized) >= MAX_REQUIREMENTS_PER_QUESTION:
+            break
 
     return normalized
 
@@ -479,17 +539,29 @@ def _evaluate_question(
     if not candidates:
 
         return CoverageAssessment(
-            evidence_numbers=[],
-            missing_information=(
-                "No relevant verified evidence was "
-                "found for this research requirement."
-            ),
+            requirements=[
+                RequirementAssessment(
+                    requirement=(
+                        research_question.question
+                    ),
+                    covered=False,
+                    evidence_numbers=[],
+                    reason=(
+                        "No relevant verified evidence "
+                        "was available."
+                    ),
+                )
+            ]
         )
 
     candidate_numbers = {
         number
         for number, _ in candidates
     }
+
+    # --------------------------------------------------------
+    # LLM coverage evaluation
+    # --------------------------------------------------------
 
     try:
 
@@ -516,39 +588,87 @@ def _evaluate_question(
         )
 
         return CoverageAssessment(
-            evidence_numbers=[],
-            missing_information=(
-                "Coverage evaluation failed; "
-                "additional verification is required."
-            ),
+            requirements=[
+                RequirementAssessment(
+                    requirement=(
+                        research_question.question
+                    ),
+                    covered=False,
+                    evidence_numbers=[],
+                    reason=(
+                        "Coverage evaluation failed; "
+                        "additional verified evidence "
+                        "is required."
+                    ),
+                )
+            ]
         )
 
-    valid_numbers = _normalize_evidence_numbers(
-        numbers=response.evidence_numbers,
-        candidate_numbers=candidate_numbers,
+    # --------------------------------------------------------
+    # Normalize model output
+    # --------------------------------------------------------
+
+    requirements = _deduplicate_requirements(
+        response.requirements
     )
 
-    if not valid_numbers:
+    # --------------------------------------------------------
+    # Validate evidence numbers and coverage
+    # --------------------------------------------------------
 
-        missing_information = (
-            response.missing_information.strip()
+    normalized_requirements = []
+
+    for requirement in requirements:
+
+        valid_numbers = _normalize_evidence_numbers(
+            numbers=requirement.evidence_numbers,
+            candidate_numbers=candidate_numbers,
         )
 
-        if not missing_information:
+        # A requirement cannot be considered covered if the
+        # model did not provide valid supporting evidence.
+        covered = (
+            requirement.covered
+            and bool(valid_numbers)
+        )
 
-            missing_information = (
-                "The available verified evidence does "
-                "not directly answer this requirement."
+        normalized_requirements.append(
+            RequirementAssessment(
+                requirement=requirement.requirement,
+                covered=covered,
+                evidence_numbers=(
+                    valid_numbers
+                    if covered
+                    else []
+                ),
+                reason=requirement.reason,
             )
+        )
+
+    # --------------------------------------------------------
+    # Handle malformed/empty structured output
+    # --------------------------------------------------------
+
+    if not normalized_requirements:
 
         return CoverageAssessment(
-            evidence_numbers=[],
-            missing_information=missing_information,
+            requirements=[
+                RequirementAssessment(
+                    requirement=(
+                        research_question.question
+                    ),
+                    covered=False,
+                    evidence_numbers=[],
+                    reason=(
+                        "The evaluator did not return "
+                        "usable coverage requirements."
+                    ),
+                )
+            ]
         )
 
     return CoverageAssessment(
-        evidence_numbers=valid_numbers,
-        missing_information="",
+        requirements=normalized_requirements
     )
 
 
@@ -561,7 +681,9 @@ def research_sufficiency_node(
     state: ResearchState,
 ) -> ResearchState:
 
-    print("\n[Node] research_sufficiency")
+    print(
+        "\n[Node] research_sufficiency"
+    )
 
     research_questions = state[
         "research_questions"
@@ -661,14 +783,12 @@ def research_sufficiency_node(
 
         owned_global_numbers = [
             global_number
-            for global_number, _ in
-            owned_evidence_with_numbers
+            for global_number, _ in owned_evidence_with_numbers
         ]
 
         owned_evidence = [
             item
-            for _, item in
-            owned_evidence_with_numbers
+            for _, item in owned_evidence_with_numbers
         ]
 
         print(
@@ -698,23 +818,22 @@ def research_sufficiency_node(
 
     for index, assessment in assessments:
 
-        if assessment.evidence_numbers:
+        missing_requirements = [
+            requirement.requirement
+            for requirement in assessment.requirements
+            if not requirement.covered
+        ]
+
+        if not missing_requirements:
             continue
 
         question = research_questions[
             index - 1
         ]
 
-        missing_information = (
-            assessment.missing_information.strip()
+        missing_information = "; ".join(
+            missing_requirements
         )
-
-        if not missing_information:
-
-            missing_information = (
-                "Additional verified evidence is required "
-                f"to answer: {question.question}"
-            )
 
         gap = (
             f"{question.question} "
@@ -737,8 +856,9 @@ def research_sufficiency_node(
     if research_sufficient:
 
         reason = (
-            "Every planned research requirement has "
-            "verified evidence directly mapped to it."
+            "Every planned research question has all "
+            "identified important information requirements "
+            "covered by verified evidence."
         )
 
     else:
@@ -748,8 +868,9 @@ def research_sufficiency_node(
         )
 
         reason = (
-            f"{uncovered_count} research requirement(s) "
-            "still lack directly mapped verified evidence."
+            f"{uncovered_count} research question(s) "
+            "still have one or more missing information "
+            "requirements."
         )
 
     # --------------------------------------------------------
@@ -767,10 +888,22 @@ def research_sufficiency_node(
 
     for index, assessment in assessments:
 
+        missing_requirements = [
+            requirement
+            for requirement in assessment.requirements
+            if not requirement.covered
+        ]
+
+        covered_requirements = [
+            requirement
+            for requirement in assessment.requirements
+            if requirement.covered
+        ]
+
         status = (
             "COVERED"
-            if assessment.evidence_numbers
-            else "NOT COVERED"
+            if not missing_requirements
+            else "PARTIALLY COVERED"
         )
 
         print(
@@ -778,23 +911,45 @@ def research_sufficiency_node(
             f"{status}"
         )
 
-        if assessment.evidence_numbers:
+        if assessment.requirements:
 
             print(
-                "        Evidence: "
-                + ", ".join(
-                    str(number)
-                    for number
-                    in assessment.evidence_numbers
+                "        Requirements:"
+            )
+
+            for requirement in (
+                assessment.requirements
+            ):
+
+                coverage_status = (
+                    "COVERED"
+                    if requirement.covered
+                    else "MISSING"
                 )
-            )
 
-        else:
+                print(
+                    f"          - "
+                    f"[{coverage_status}] "
+                    f"{requirement.requirement}"
+                )
 
-            print(
-                "        Missing: "
-                f"{assessment.missing_information}"
-            )
+                if requirement.reason:
+
+                    print(
+                        f"            Reason: "
+                        f"{requirement.reason}"
+                    )
+
+                if requirement.evidence_numbers:
+
+                    print(
+                        "            Evidence: "
+                        + ", ".join(
+                            str(number)
+                            for number
+                            in requirement.evidence_numbers
+                        )
+                    )
 
     print(
         "  Research gaps:"

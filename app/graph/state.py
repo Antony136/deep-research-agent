@@ -44,8 +44,8 @@ class ResearchState(TypedDict):
     # being processed.
     active_research_question_number: int | None
 
-    # Sources belonging to the research question
-    # currently being processed.
+    # Sources belonging to the research question currently
+    # being processed.
     current_sources: list[Source]
 
     # RESEARCH DATA
@@ -70,12 +70,28 @@ class ResearchState(TypedDict):
     #
     # If the initial plan is exhausted and the evidence is
     # still insufficient, the adaptive planner can create a
-    # targeted follow-up plan and advance the round.
+    # targeted follow-up plan.
     research_round: int
 
-    # Hard application-level limit preventing the agent
-    # from researching indefinitely.
+    # Maximum number of research rounds.
+    #
+    # This controls how many adaptive cycles are allowed.
     max_research_rounds: int
+
+    # Absolute maximum number of research questions that
+    # may be processed during the entire research session.
+    #
+    # This is separate from max_research_rounds.
+    #
+    # Example:
+    #
+    #   Initial plan       = 5 questions
+    #   Adaptive additions = up to 3 questions
+    #   Total              = 8 questions maximum
+    #
+    # This prevents research from expanding indefinitely
+    # through repeated adaptive planning.
+    max_total_research_questions: int
 
     # Information that the sufficiency evaluator determined
     # is still missing from the research.

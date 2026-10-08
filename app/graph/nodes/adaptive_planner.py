@@ -6,8 +6,7 @@ The adaptive planner is activated only when:
 1. The initial research plan has been exhausted.
 2. The verified evidence is still insufficient.
 
-It converts the missing information identified by the
-research sufficiency evaluator into targeted follow-up
+It converts identified research gaps into targeted follow-up
 research questions.
 
 The planner does not perform web searches itself.
@@ -15,6 +14,7 @@ The existing researcher node handles those questions.
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
@@ -56,8 +56,8 @@ class AdaptiveResearchOutput(BaseModel):
     research_questions: list[ResearchQuestion] = Field(
         default_factory=list,
         description=(
-            "Targeted research questions that directly "
-            "address the identified research gaps."
+            "Targeted follow-up research questions that "
+            "directly address the supplied research gaps."
         ),
     )
 
@@ -75,37 +75,81 @@ prompt = ChatPromptTemplate.from_messages(
 You are the adaptive planning component of a deep
 research agent.
 
-The initial research plan has already been completed,
-but the verified evidence is still insufficient.
+The initial research plan has already been completed.
 
-Your task is to create a small set of targeted follow-up
-research questions that directly address the identified
-research gaps.
+The research sufficiency evaluator found specific
+information that is still missing.
 
-IMPORTANT:
+Your job is to create targeted follow-up research
+questions that can be sent directly to the web researcher.
 
-1. Use the user's original research question as the goal.
-2. Use ONLY the supplied research gaps to determine what
-   additional information is needed.
-3. Do not repeat research questions that have already been
-   investigated.
-4. Do not generate broad or unrelated questions.
-5. Each follow-up question must address a specific factual
-   gap.
-6. Provide useful web search queries for each question.
-7. Search queries should be concrete and directly useful
-   for finding reliable sources.
-8. Prefer authoritative documentation, official sources,
-   technical documentation, engineering reports, reputable
-   case studies, and other high-quality sources.
-9. Do not answer the research questions yourself.
-10. Do not invent facts.
-11. Generate at most 3 follow-up research questions.
-12. If the supplied gaps do not justify additional research,
-    return an empty list.
+IMPORTANT RULES:
 
-The resulting questions will be passed to the existing
-researcher node.
+1. The original user question is the highest-level scope.
+   Never introduce a new topic outside that scope.
+
+2. Every follow-up question MUST directly address one
+   of the supplied research gaps.
+
+3. Use the missing information described by the gap as
+   the primary basis for the follow-up question.
+
+4. Do not answer the research gap yourself.
+
+5. Do not invent facts, entities, countries, organizations,
+   programs, statistics, or events that are not supported
+   by the original question or research gap.
+
+6. Do not introduce a new geographic region unless the
+   original question or research gap explicitly requires it.
+
+7. Do not introduce a new industry, subject, population,
+   policy area, or research dimension unless it is already
+   part of the original question or gap.
+
+8. Do not create broad questions.
+
+9. Do not repeat an already investigated question.
+
+10. A follow-up question must be independently
+    researchable using web search.
+
+11. Every follow-up question MUST contain a concrete
+    factual information target.
+
+12. Every follow-up question MUST have at least one
+    useful search query.
+
+13. Search queries must remain within the scope of the
+    original question and the specific research gap.
+
+14. Prefer authoritative and directly relevant sources,
+    including:
+    - government reports
+    - international organizations
+    - academic research
+    - official programs
+    - technical reports
+    - reputable research organizations
+
+15. Generate at most 3 follow-up questions.
+
+16. Prefer one focused question per major research gap.
+
+17. Do not create multiple questions that investigate
+    substantially the same missing information.
+
+18. Do not return an empty list when an actionable
+    factual gap is available.
+
+19. Return an empty list only when there is genuinely
+    no actionable research gap.
+
+20. Keep follow-up questions narrower than the original
+    research questions whenever possible.
+
+The purpose of adaptive planning is to fill missing
+evidence, not to restart or expand the research plan.
 
 Return only the requested structured output.
 """,
@@ -124,6 +168,12 @@ Research gaps identified by the sufficiency evaluator:
 Research questions already investigated:
 
 {existing_questions}
+
+Create targeted follow-up research questions that
+specifically address the missing information.
+
+Do not introduce information outside the scope of the
+original research question and the identified gaps.
 """,
         ),
     ]
@@ -144,8 +194,11 @@ def _format_research_gaps(
         return "No research gaps were identified."
 
     return "\n".join(
-        f"- {gap}"
-        for gap in gaps
+        f"GAP {index}:\n{gap}"
+        for index, gap in enumerate(
+            gaps,
+            start=1,
+        )
     )
 
 
@@ -162,15 +215,10 @@ def _format_existing_questions(
 
     sections = []
 
-    # IMPORTANT:
-    # Use the function parameter `questions`.
-    # The previous implementation incorrectly referenced
-    # `existing_questions`, which does not exist here.
     for index, question in enumerate(
         questions,
         start=1,
     ):
-
         sections.append(
             f"""
 QUESTION {index}
@@ -183,14 +231,213 @@ Search queries:
 """.strip()
         )
 
-    return "\n\n".join(
-        sections
+    return "\n\n".join(sections)
+
+
+def _normalize_text(
+    value: str,
+) -> str:
+    """
+    Normalize text for duplicate detection.
+    """
+
+    return " ".join(
+        value.lower().split()
     )
+
+
+def _is_duplicate_question(
+    question: ResearchQuestion,
+    existing_questions: list[ResearchQuestion],
+    generated_questions: list[ResearchQuestion],
+) -> bool:
+    """
+    Check whether a generated question duplicates an
+    existing or previously generated research question.
+    """
+
+    normalized = _normalize_text(
+        question.question
+    )
+
+    for existing in (
+        existing_questions
+        + generated_questions
+    ):
+        if normalized == _normalize_text(
+            existing.question
+        ):
+            return True
+
+    return False
+
+
+def _validate_follow_up_question(
+    question: ResearchQuestion,
+) -> bool:
+    """
+    Validate the minimum structure required for a
+    follow-up research question.
+    """
+
+    if not question.question.strip():
+        return False
+
+    valid_queries = [
+        query.strip()
+        for query in question.search_queries
+        if query.strip()
+    ]
+
+    if not valid_queries:
+        return False
+
+    return True
+
+
+def _filter_follow_up_questions(
+    generated_questions: list[ResearchQuestion],
+    existing_questions: list[ResearchQuestion],
+) -> list[ResearchQuestion]:
+    """
+    Remove invalid and duplicate follow-up questions.
+    """
+
+    valid_questions = []
+
+    for question in generated_questions:
+
+        if not _validate_follow_up_question(
+            question
+        ):
+            print(
+                "  Rejected follow-up question: "
+                "missing question or search queries."
+            )
+            continue
+
+        if _is_duplicate_question(
+            question,
+            existing_questions,
+            valid_questions,
+        ):
+            print(
+                "  Rejected duplicate follow-up question:"
+            )
+            print(
+                f"    {question.question}"
+            )
+            continue
+
+        valid_questions.append(
+            question
+        )
+
+        if len(valid_questions) >= MAX_FOLLOW_UP_QUESTIONS:
+            break
+
+    return valid_questions
+
+
+def _extract_gap_question(
+    gap: str,
+) -> str:
+    """
+    Extract the actionable research question from a
+    sufficiency-evaluator gap.
+
+    The sufficiency evaluator normally stores the
+    original research question followed by a description
+    of the missing information.
+    """
+
+    question = gap.strip()
+
+    question = re.split(
+        r"\s+[—-]\s+missing\s*:",
+        question,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+
+    question = re.sub(
+        r"^gap\s*\d+\s*:\s*",
+        "",
+        question,
+        flags=re.IGNORECASE,
+    )
+
+    return question.strip()
+
+
+def _build_fallback_questions(
+    research_gaps: list[str],
+    existing_questions: list[ResearchQuestion],
+) -> list[ResearchQuestion]:
+    """
+    Build deterministic follow-up questions when the LLM
+    does not return usable structured questions.
+
+    The fallback does not invent a new research direction.
+    It reuses the actionable research question already
+    identified by the sufficiency evaluator.
+    """
+
+    fallback_questions = []
+
+    for gap in research_gaps:
+
+        if len(fallback_questions) >= MAX_FOLLOW_UP_QUESTIONS:
+            break
+
+        question_text = _extract_gap_question(
+            gap
+        )
+
+        if not question_text:
+            continue
+
+        candidate = ResearchQuestion(
+            question=question_text,
+            search_queries=[
+                question_text,
+                f"{question_text} official report",
+                f"{question_text} research study",
+            ],
+        )
+
+        if not _validate_follow_up_question(
+            candidate
+        ):
+            continue
+
+        if _is_duplicate_question(
+            candidate,
+            existing_questions,
+            fallback_questions,
+        ):
+            continue
+
+        fallback_questions.append(
+            candidate
+        )
+
+    return fallback_questions
 
 
 def adaptive_planner_node(
     state: ResearchState,
 ) -> ResearchState:
+    """
+    Generate targeted follow-up research questions when
+    the current evidence is insufficient.
+
+    Qwen is the primary adaptive planner.
+
+    If Qwen fails or returns unusable structured output,
+    a deterministic fallback converts the identified
+    research gaps into focused research questions.
+    """
 
     print(
         "\n[Node] adaptive_planner"
@@ -216,15 +463,23 @@ def adaptive_planner_node(
         f"{len(research_gaps)}"
     )
 
-    for gap in research_gaps:
-
+    for index, gap in enumerate(
+        research_gaps,
+        start=1,
+    ):
         print(
-            f"    - {gap}"
+            f"    [{index}] {gap}"
         )
 
     existing_questions = state[
         "research_questions"
     ]
+
+    follow_up_questions = []
+
+    # ------------------------------------------------------
+    # 1. PRIMARY PATH: QWEN ADAPTIVE PLANNING
+    # ------------------------------------------------------
 
     try:
 
@@ -246,6 +501,11 @@ def adaptive_planner_node(
             }
         )
 
+        follow_up_questions = _filter_follow_up_questions(
+            generated_questions=response.research_questions,
+            existing_questions=existing_questions,
+        )
+
     except Exception as exc:
 
         print(
@@ -256,28 +516,46 @@ def adaptive_planner_node(
             f"  {exc}"
         )
 
-        return {
-            **state,
-            "research_complete": True,
-        }
-
-    follow_up_questions = (
-        response.research_questions[
-            :MAX_FOLLOW_UP_QUESTIONS
-        ]
-    )
+    # ------------------------------------------------------
+    # 2. DETERMINISTIC FALLBACK
+    # ------------------------------------------------------
 
     if not follow_up_questions:
 
         print(
-            "  No useful follow-up research "
-            "questions were generated."
+            "  Qwen did not produce usable follow-up "
+            "questions."
+        )
+
+        print(
+            "  Building follow-up questions from the "
+            "identified research gaps."
+        )
+
+        follow_up_questions = _build_fallback_questions(
+            research_gaps=research_gaps,
+            existing_questions=existing_questions,
+        )
+
+    # ------------------------------------------------------
+    # 3. STOP IF NO ACTIONABLE FOLLOW-UP EXISTS
+    # ------------------------------------------------------
+
+    if not follow_up_questions:
+
+        print(
+            "  No valid follow-up research "
+            "questions could be generated."
         )
 
         return {
             **state,
             "research_complete": True,
         }
+
+    # ------------------------------------------------------
+    # 4. DISPLAY FOLLOW-UP PLAN
+    # ------------------------------------------------------
 
     print(
         "  Follow-up questions generated: "
@@ -305,6 +583,10 @@ def adaptive_planner_node(
             print(
                 f"        - {query}"
             )
+
+    # ------------------------------------------------------
+    # 5. EXTEND THE RESEARCH PLAN
+    # ------------------------------------------------------
 
     combined_questions = (
         existing_questions
