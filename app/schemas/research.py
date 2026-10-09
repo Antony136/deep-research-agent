@@ -3,8 +3,10 @@ Core schemas for the Deep Research Agent.
 
 These Pydantic models define the structured data that moves
 through the research system, including evidence-backed
-findings in the final report.
+findings and research coverage in the final report.
 """
+
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -111,6 +113,46 @@ class ResearchFinding(BaseModel):
     )
 
 
+class ResearchCoverage(BaseModel):
+    """
+    Coverage assessment for one original research question.
+    """
+
+    research_question_number: int = Field(
+        ge=1,
+        description="1-based number of the original research question.",
+    )
+
+    question: str = Field(
+        description="The original research question being assessed."
+    )
+
+    status: Literal[
+        "supported",
+        "partially_supported",
+        "unresolved",
+    ] = Field(
+        description=(
+            "Whether the collected evidence sufficiently answers "
+            "the original research question."
+        )
+    )
+
+    finding_numbers: list[int] = Field(
+        default_factory=list,
+        description=(
+            "1-based positions of findings that address this question."
+        ),
+    )
+
+    explanation: str = Field(
+        description=(
+            "Brief explanation of the coverage status, including "
+            "what remains unanswered when applicable."
+        )
+    )
+
+
 class ResearchReport(BaseModel):
     """
     Final structured research report.
@@ -132,6 +174,21 @@ class ResearchReport(BaseModel):
         description=(
             "Important findings, each linked to the research "
             "questions it addresses and the evidence supporting it."
+        ),
+    )
+
+    coverage: list[ResearchCoverage] = Field(
+        default_factory=list,
+        description=(
+            "Coverage assessment for every original research question."
+        ),
+    )
+
+    research_gaps: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Important questions or aspects that remain unresolved "
+            "because the collected evidence is insufficient."
         ),
     )
 

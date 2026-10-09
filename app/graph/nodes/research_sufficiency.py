@@ -1,32 +1,11 @@
 """
 Research sufficiency evaluator for the Deep Research Agent.
 
-This node determines whether the collected verified evidence
-is sufficient to answer the original research questions.
+Evaluates each original research question independently and
+persists its coverage assessment in LangGraph state.
 
-Original research questions own the final coverage decision.
-
-Adaptive follow-up questions are descendants of their parent
-question. Their verified evidence is therefore included when
-evaluating the parent.
-
-Example:
-
-    Q2
-     ├── Q6
-     │    └── evidence for Q6
-     │
-     └── Q7
-          └── evidence for Q7
-
-When evaluating Q2, evidence from Q2, Q6, and Q7 is considered.
-
-The evaluator deliberately avoids asking the LLM to invent a
-large set of requirements. The original research question
-itself defines the scope.
-
-This prevents one research question from accidentally inheriting
-requirements from another research question.
+Adaptive follow-up questions contribute evidence to their
+original parent's coverage assessment.
 """
 
 import os
@@ -55,57 +34,35 @@ BASE_URL = os.getenv(
 )
 
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
-
 MAX_EVIDENCE_PER_QUESTION = 8
 MIN_TOKEN_OVERLAP = 0.05
 
 
-# ------------------------------------------------------------
-# Structured output
-# ------------------------------------------------------------
-
-
 class CoverageAssessment(BaseModel):
-    """
-    Final coverage decision for one original research question.
-
-    The LLM is intentionally not allowed to invent a separate
-    requirement list. The original research question defines
-    the scope.
-    """
+    """Sufficiency decision for one original research question."""
 
     covered: bool = Field(
         description=(
-            "True only when the supplied verified evidence "
-            "is sufficient to answer the original research "
-            "question."
+            "True only when verified evidence is sufficient "
+            "to answer the original research question."
         )
     )
 
     evidence_numbers: list[int] = Field(
         default_factory=list,
         description=(
-            "GLOBAL 1-based evidence numbers that directly "
-            "support the coverage decision."
+            "Global 1-based evidence numbers directly supporting "
+            "the coverage decision."
         ),
     )
 
     reason: str = Field(
         default="",
         description=(
-            "Brief explanation of why the evidence is or is "
-            "not sufficient to answer the original research "
-            "question."
+            "Concise explanation of why the evidence is or is "
+            "not sufficient."
         ),
     )
-
-
-# ------------------------------------------------------------
-# Model
-# ------------------------------------------------------------
 
 
 model = ChatOllama(
@@ -114,15 +71,9 @@ model = ChatOllama(
     temperature=0,
 )
 
-
 structured_model = model.with_structured_output(
     CoverageAssessment
 )
-
-
-# ------------------------------------------------------------
-# Prompt
-# ------------------------------------------------------------
 
 
 prompt = ChatPromptTemplate.from_messages(
@@ -133,91 +84,33 @@ prompt = ChatPromptTemplate.from_messages(
 You are the research sufficiency evaluator of a deep
 research agent.
 
-Your job is to decide whether VERIFIED EVIDENCE is sufficient
-to answer ONE ORIGINAL RESEARCH QUESTION.
+Decide whether VERIFIED EVIDENCE is sufficient to answer
+ONE ORIGINAL RESEARCH QUESTION. You are not writing the
+final answer.
 
-You are NOT writing the final answer.
+RULES:
 
-You must evaluate ONLY the supplied verified evidence.
-
-IMPORTANT SCOPE RULES:
-
-1. The ORIGINAL RESEARCH QUESTION defines the complete scope.
-
-2. Do NOT create additional requirements that are not explicitly
-   required by the original research question.
-
-3. Do NOT import requirements from other research questions.
-
-4. Do NOT use the overall user question to expand the scope
-   beyond the current original research question.
-
-5. Adaptive follow-up questions are evidence-gathering tasks.
-   Their wording may be more specific than the original
-   question, but their evidence may be used if it genuinely
-   helps answer the original question.
-
-6. Judge evidence semantically, not merely by keyword overlap.
-
-7. Read BOTH the evidence CLAIM and SUPPORTING TEXT.
-
-8. Evidence must directly support the answer.
-
-9. Do not mark a question covered merely because the evidence
-   discusses the same general topic.
-
-10. If the question asks for a comparison, the evidence must
-    provide enough information to actually make that comparison.
-
-11. If the question asks how something changed over time, the
-    evidence must provide enough information about the relevant
-    change or time periods.
-
-12. If the question asks which option/entity is best, the
-    evidence must contain enough relevant information to support
-    that comparison or conclusion.
-
-13. For questions with multiple explicit dimensions, evidence
-    must cover those dimensions sufficiently.
-
-14. Do not require unrelated:
-    - historical background
-    - definitions
-    - examples
-    - recommendations
-    - implementation details
-    - limitations
-    - future work
-
-    unless the original research question explicitly asks for
-    them or they are necessary to answer it.
-
-15. Be conservative.
-
-16. If important information is missing, set covered=false.
-
-17. If the evidence is only partially relevant, set
-    covered=false.
-
-18. If evidence is weak, generic, indirect, or merely mentions
-    the topic, set covered=false.
-
-19. Do not use outside knowledge.
-
-20. Do not infer facts that are not present in the supplied
-    evidence.
-
-21. evidence_numbers must contain only GLOBAL evidence numbers
-    supplied in the input.
-
-22. Do not invent evidence numbers.
-
-23. If covered=true, provide the GLOBAL evidence numbers that
-    directly support the decision.
-
-24. If covered=false, evidence_numbers should normally be empty.
-
-25. Keep the reason concise and specific.
+1. The original research question defines the complete scope.
+2. Do not invent additional requirements.
+3. Do not import requirements from other original questions.
+4. Evaluate only the supplied verified evidence.
+5. Read both the evidence claim and supporting text.
+6. Judge semantic relevance, not just keyword overlap.
+7. Evidence must directly support the answer.
+8. A comparison question requires enough evidence to make
+   the requested comparison.
+9. Questions with multiple explicit dimensions require
+   sufficient evidence for those dimensions.
+10. Do not require unrelated background, recommendations,
+    examples, limitations, or implementation details unless
+    the original question requires them.
+11. Be conservative. If important information is missing,
+    set covered=false.
+12. Do not use outside knowledge or infer unsupported facts.
+13. Use only the global evidence numbers provided.
+14. If covered=true, provide valid evidence numbers.
+15. If covered=false, evidence_numbers should normally be empty.
+16. Explain any missing information concisely.
 
 Return only the requested structured output.
 """,
@@ -229,118 +122,70 @@ ORIGINAL USER QUESTION:
 
 {question}
 
-
 ORIGINAL RESEARCH QUESTION BEING EVALUATED:
 
 {research_question}
-
 
 QUESTION TREE:
 
 {question_tree}
 
-
 VERIFIED EVIDENCE:
 
 {evidence}
 
+Evaluate only the original research question.
 
-Evaluate ONLY this original research question:
+Evidence from its follow-up descendants may be used when it
+directly helps answer the original question. Do not import
+requirements from other original questions.
 
-{research_question}
+If the evidence is sufficient, set covered=true and provide
+global evidence numbers supporting that decision.
 
-The question tree shows adaptive follow-up questions that were
-created to gather additional evidence for this original question.
-
-Evidence from those descendants may be used when it directly
-helps answer the original question.
-
-Do NOT import requirements from any other original research
-question.
-
-Do NOT invent a new research scope.
-
-Decide whether the supplied verified evidence is sufficient
-to answer the original research question.
-
-If the question is fully and adequately supported:
-
-- covered = true
-- provide the GLOBAL evidence numbers that support it
-
-If important information is missing:
-
-- covered = false
-- evidence_numbers should normally be empty
-- explain what is still missing in the reason
-
-Return only the requested structured output.
+If important information is missing, set covered=false,
+normally return an empty evidence_numbers list, and explain
+what is missing.
 """,
         ),
     ]
 )
 
-
 chain = prompt | structured_model
 
 
-# ------------------------------------------------------------
-# Text helpers
-# ------------------------------------------------------------
-
-
-def _tokenize(
-    text: str,
-) -> set[str]:
-    """
-    Convert text into a lightweight set of lowercase tokens.
-    """
+def _tokenize(text: str) -> set[str]:
+    """Convert text into lowercase tokens."""
 
     return {
         token
-        for token in re.findall(
-            r"[a-zA-Z0-9]+",
-            text.lower(),
-        )
+        for token in re.findall(r"[a-zA-Z0-9]+", text.lower())
         if len(token) > 2
     }
 
 
-def _question_tokens(
-    question: ResearchQuestion,
-) -> set[str]:
-    """
-    Build tokens from a research question and its search queries.
-    """
+def _question_tokens(question: ResearchQuestion) -> set[str]:
+    """Build tokens from a question and its search queries."""
 
-    text = " ".join(
-        [
-            question.question,
-            *question.search_queries,
-        ]
+    return _tokenize(
+        " ".join(
+            [
+                question.question,
+                *question.search_queries,
+            ]
+        )
     )
-
-    return _tokenize(text)
 
 
 def _combined_question_tokens(
     questions: list[ResearchQuestion],
 ) -> set[str]:
-    """
-    Build lexical tokens for the complete question tree.
-
-    This is used ONLY for candidate selection.
-
-    It does not determine whether evidence is sufficient.
-    """
+    """Build tokens for candidate selection only."""
 
     tokens = set()
 
     for question in questions:
-
-        tokens.update(
-            _question_tokens(question)
-        )
+        tokens.update(_question_tokens(question))
 
     return tokens
 
@@ -349,13 +194,7 @@ def _evidence_relevance_score(
     question_tokens: set[str],
     evidence: Evidence,
 ) -> float:
-    """
-    Calculate lightweight lexical relevance.
-
-    This is NOT the final coverage decision.
-
-    It only reduces the amount of evidence sent to the LLM.
-    """
+    """Calculate lexical relevance for candidate selection."""
 
     evidence_tokens = _tokenize(
         f"{evidence.claim} {evidence.supporting_text}"
@@ -364,39 +203,23 @@ def _evidence_relevance_score(
     if not question_tokens or not evidence_tokens:
         return 0.0
 
-    overlap = (
-        len(
-            question_tokens
-            & evidence_tokens
-        )
+    return (
+        len(question_tokens & evidence_tokens)
         / len(question_tokens)
     )
-
-    return overlap
-
-
-# ------------------------------------------------------------
-# Formatting
-# ------------------------------------------------------------
 
 
 def _format_evidence(
     evidence: list[tuple[int, Evidence]],
 ) -> str:
-    """
-    Format candidate evidence while preserving GLOBAL IDs.
-    """
+    """Format evidence while preserving global IDs."""
 
     if not evidence:
-
-        return (
-            "No relevant verified evidence candidates."
-        )
+        return "No relevant verified evidence candidates."
 
     sections = []
 
     for number, item in evidence:
-
         sections.append(
             f"""
 GLOBAL EVIDENCE {number}
@@ -421,131 +244,70 @@ Supporting text:
 def _format_question_tree(
     question_tree: list[tuple[int, ResearchQuestion]],
 ) -> str:
-    """
-    Format the actual question-tree lineage.
-
-    Example:
-
-        Q4: How did X change?
-        Q6: What evidence explains the 2023 change?
-        Q7: What evidence explains the 2026 change?
-    """
+    """Format the actual question-tree lineage."""
 
     if not question_tree:
-
         return "No question-tree information available."
 
     sections = []
 
     for number, question in question_tree:
-
         parent = question.parent_question_number
 
-        if parent is None:
-
-            relationship = "original question"
-
-        else:
-
-            relationship = (
-                f"follow-up to Q{parent}"
-            )
+        relationship = (
+            "original question"
+            if parent is None
+            else f"follow-up to Q{parent}"
+        )
 
         sections.append(
-            f"""
-Q{number} ({relationship})
-
-{question.question}
-""".strip()
+            f"Q{number} ({relationship})\n\n"
+            f"{question.question}"
         )
 
     return "\n\n".join(sections)
-
-
-# ------------------------------------------------------------
-# Normalization
-# ------------------------------------------------------------
 
 
 def _normalize_evidence_numbers(
     numbers: list[int],
     candidate_numbers: set[int],
 ) -> list[int]:
-    """
-    Keep only valid GLOBAL evidence numbers that were actually
-    supplied to the LLM.
-    """
+    """Keep unique global IDs that were supplied to the LLM."""
 
     normalized = []
 
     for number in numbers:
-
         if (
             number in candidate_numbers
             and number not in normalized
         ):
-
-            normalized.append(
-                number
-            )
+            normalized.append(number)
 
     return normalized
-
-
-# ------------------------------------------------------------
-# Research-question lineage
-# ------------------------------------------------------------
 
 
 def _get_descendant_question_numbers(
     root_question_number: int,
     research_questions: list[ResearchQuestion],
 ) -> set[int]:
-    """
-    Return the root question and every adaptive follow-up
-    question descended from it.
+    """Return a root question and all its recursive descendants."""
 
-    Descendants are resolved recursively.
-
-    Example:
-
-        Q2
-         └── Q6
-              └── Q9
-
-    Evaluating Q2 therefore includes:
-
-        Q2 + Q6 + Q9
-    """
-
-    descendants = {
-        root_question_number
-    }
+    descendants = {root_question_number}
 
     changed = True
 
     while changed:
-
         changed = False
 
         for index, question in enumerate(
             research_questions,
             start=1,
         ):
-
             if index in descendants:
                 continue
 
-            parent_number = (
-                question.parent_question_number
-            )
-
-            if parent_number in descendants:
-
-                descendants.add(
-                    index
-                )
-
+            if question.parent_question_number in descendants:
+                descendants.add(index)
                 changed = True
 
     return descendants
@@ -556,41 +318,28 @@ def _get_evidence_for_question_tree(
     research_questions: list[ResearchQuestion],
     evidence: list[Evidence],
 ) -> list[tuple[int, Evidence]]:
-    """
-    Collect verified evidence belonging to the root research
-    question or any of its adaptive descendants.
+    """Collect evidence from a root question and its descendants."""
 
-    Evidence keeps its original question number.
-    """
-
-    question_numbers = (
-        _get_descendant_question_numbers(
-            root_question_number=root_question_number,
-            research_questions=research_questions,
-        )
+    question_numbers = _get_descendant_question_numbers(
+        root_question_number=root_question_number,
+        research_questions=research_questions,
     )
 
     print(
         "  Evidence lineage questions: "
         + ", ".join(
             f"Q{number}"
-            for number in sorted(
-                question_numbers
-            )
+            for number in sorted(question_numbers)
         )
     )
 
     return [
-        (
-            global_number,
-            item,
-        )
+        (global_number, item)
         for global_number, item in enumerate(
             evidence,
             start=1,
         )
-        if item.research_question_number
-        in question_numbers
+        if item.research_question_number in question_numbers
     ]
 
 
@@ -598,23 +347,15 @@ def _get_questions_for_question_tree(
     root_question_number: int,
     research_questions: list[ResearchQuestion],
 ) -> list[tuple[int, ResearchQuestion]]:
-    """
-    Return the actual ResearchQuestion objects and their GLOBAL
-    question numbers belonging to a question tree.
-    """
+    """Return question objects and IDs for one question tree."""
 
-    question_numbers = (
-        _get_descendant_question_numbers(
-            root_question_number=root_question_number,
-            research_questions=research_questions,
-        )
+    question_numbers = _get_descendant_question_numbers(
+        root_question_number=root_question_number,
+        research_questions=research_questions,
     )
 
     return [
-        (
-            index,
-            question,
-        )
+        (index, question)
         for index, question in enumerate(
             research_questions,
             start=1,
@@ -623,29 +364,13 @@ def _get_questions_for_question_tree(
     ]
 
 
-# ------------------------------------------------------------
-# Single-question evaluation
-# ------------------------------------------------------------
-
-
 def _evaluate_question(
     research_question: ResearchQuestion,
     evidence: list[Evidence],
     global_evidence_numbers: list[int],
     question_tree: list[tuple[int, ResearchQuestion]],
 ) -> CoverageAssessment:
-    """
-    Evaluate one original research question.
-
-    Only the original question defines the scope.
-
-    Evidence from adaptive descendants may support the answer,
-    but descendants cannot introduce new requirements.
-    """
-
-    # --------------------------------------------------------
-    # Candidate selection
-    # --------------------------------------------------------
+    """Evaluate whether evidence answers one original question."""
 
     question_tree_objects = [
         question
@@ -662,20 +387,14 @@ def _evaluate_question(
         global_evidence_numbers,
         evidence,
     ):
-
         score = _evidence_relevance_score(
             question_tokens=question_tokens,
             evidence=item,
         )
 
         if score >= MIN_TOKEN_OVERLAP:
-
             scored.append(
-                (
-                    score,
-                    global_number,
-                    item,
-                )
+                (score, global_number, item)
             )
 
     scored.sort(
@@ -685,23 +404,14 @@ def _evaluate_question(
         )
     )
 
-    selected = scored[
-        :MAX_EVIDENCE_PER_QUESTION
-    ]
-
     candidates = [
-        (
-            global_number,
-            item,
-        )
-        for _, global_number, item in selected
+        (global_number, item)
+        for _, global_number, item in scored[
+            :MAX_EVIDENCE_PER_QUESTION
+        ]
     ]
 
-    print(
-        f"\n  Evaluating:"
-        f" {research_question.question}"
-    )
-
+    print(f"\n  Evaluating: {research_question.question}")
     print(
         "  Question tree: "
         + ", ".join(
@@ -709,30 +419,16 @@ def _evaluate_question(
             for number, _ in question_tree
         )
     )
-
-    print(
-        "  Verified evidence in question tree: "
-        f"{len(evidence)}"
-    )
-
-    print(
-        "  Candidate evidence: "
-        f"{len(candidates)}"
-    )
-
-    # --------------------------------------------------------
-    # No evidence
-    # --------------------------------------------------------
+    print(f"  Verified evidence in question tree: {len(evidence)}")
+    print(f"  Candidate evidence: {len(candidates)}")
 
     if not candidates:
-
         return CoverageAssessment(
             covered=False,
             evidence_numbers=[],
             reason=(
-                "No relevant verified evidence "
-                "was available to answer this "
-                "research question."
+                "No relevant verified evidence was available "
+                "to answer this research question."
             ),
         )
 
@@ -741,88 +437,44 @@ def _evaluate_question(
         for number, _ in candidates
     }
 
-    # --------------------------------------------------------
-    # LLM coverage evaluation
-    # --------------------------------------------------------
-
     try:
-
         response = chain.invoke(
             {
-                "question": (
-                    research_question.question
+                "question": research_question.question,
+                "research_question": research_question.question,
+                "question_tree": _format_question_tree(
+                    question_tree
                 ),
-                "research_question": (
-                    research_question.question
-                ),
-                "question_tree": (
-                    _format_question_tree(
-                        question_tree
-                    )
-                ),
-                "evidence": (
-                    _format_evidence(
-                        candidates
-                    )
-                ),
+                "evidence": _format_evidence(candidates),
             }
         )
-
     except Exception as exc:
-
-        print(
-            "  Coverage evaluation failed:"
-        )
-
-        print(
-            f"  {exc}"
-        )
+        print("  Coverage evaluation failed:")
+        print(f"  {exc}")
 
         return CoverageAssessment(
             covered=False,
             evidence_numbers=[],
             reason=(
-                "Coverage evaluation failed; "
-                "additional verified evidence "
-                "is required."
+                "Coverage evaluation failed; additional "
+                "verified evidence is required."
             ),
         )
 
-    # --------------------------------------------------------
-    # Normalize model output
-    # --------------------------------------------------------
-
-    valid_numbers = (
-        _normalize_evidence_numbers(
-            numbers=response.evidence_numbers,
-            candidate_numbers=candidate_numbers,
-        )
+    valid_numbers = _normalize_evidence_numbers(
+        numbers=response.evidence_numbers,
+        candidate_numbers=candidate_numbers,
     )
 
-    # --------------------------------------------------------
-    # Final deterministic coverage rule
-    # --------------------------------------------------------
+    covered = response.covered and bool(valid_numbers)
 
-    covered = (
-        response.covered
-        and bool(valid_numbers)
-    )
-
-    reason = (
-        response.reason.strip()
-        if response.reason
-        else (
-            "The supplied verified evidence "
-            "was judged insufficient."
-            if not covered
-            else
-            "The supplied verified evidence "
-            "was judged sufficient."
-        )
+    reason = response.reason.strip() or (
+        "The supplied verified evidence was judged sufficient."
+        if covered
+        else "The supplied verified evidence was judged insufficient."
     )
 
     if not covered:
-
         valid_numbers = []
 
     return CoverageAssessment(
@@ -832,45 +484,39 @@ def _evaluate_question(
     )
 
 
-# ------------------------------------------------------------
-# Main node
-# ------------------------------------------------------------
+def _serialize_assessment(
+    question_number: int,
+    assessment: CoverageAssessment,
+) -> dict:
+    """Convert an assessment into the graph-state representation."""
+
+    return {
+        "research_question_number": question_number,
+        "covered": assessment.covered,
+        "evidence_numbers": list(assessment.evidence_numbers),
+        "reason": assessment.reason,
+    }
 
 
 def research_sufficiency_node(
     state: ResearchState,
-) -> ResearchState:
+) -> dict:
+    """Evaluate sufficiency and persist every root assessment."""
 
-    print(
-        "\n[Node] research_sufficiency"
-    )
+    print("\n[Node] research_sufficiency")
 
-    research_questions = state[
-        "research_questions"
-    ]
+    research_questions = state["research_questions"]
+    evidence = state["evidence"]
 
-    evidence = state[
-        "evidence"
-    ]
-
-    print(
-        "  Planned research questions: "
-        f"{len(research_questions)}"
-    )
-
-    print(
-        "  Verified evidence available: "
-        f"{len(evidence)}"
-    )
+    print(f"  Planned research questions: {len(research_questions)}")
+    print(f"  Verified evidence available: {len(evidence)}")
 
     if not research_questions:
-
-        print(
-            "  No research questions available."
-        )
+        print("  No research questions available.")
 
         return {
             **state,
+            "coverage_assessments": [],
             "research_sufficient": False,
             "research_gaps": [
                 "No research plan was generated."
@@ -881,15 +527,8 @@ def research_sufficiency_node(
             ),
         }
 
-    # --------------------------------------------------------
-    # Identify original/root research questions
-    # --------------------------------------------------------
-
     root_questions = [
-        (
-            index,
-            question,
-        )
+        (index, question)
         for index, question in enumerate(
             research_questions,
             start=1,
@@ -897,38 +536,46 @@ def research_sufficiency_node(
         if question.parent_question_number is None
     ]
 
-    print(
-        "  Original research questions: "
-        f"{len(root_questions)}"
-    )
-
+    print(f"  Original research questions: {len(root_questions)}")
     print(
         "  Adaptive follow-up questions: "
         f"{len(research_questions) - len(root_questions)}"
     )
 
-    # --------------------------------------------------------
-    # No evidence
-    # --------------------------------------------------------
-
+    # Handle the no-evidence case while still recording a
+    # sufficiency assessment for every original question.
     if not evidence:
+        print("  No verified evidence available.")
 
-        print(
-            "  No verified evidence available."
-        )
+        assessments = []
+        gaps = []
 
-        gaps = [
-            (
-                f"{question.question} "
-                f"— missing: "
-                f"verified evidence required to answer "
-                f"this research question"
+        for question_number, question in root_questions:
+            reason = (
+                "No verified evidence has been collected "
+                "for this research question."
             )
-            for _, question in root_questions
-        ]
+
+            assessment = CoverageAssessment(
+                covered=False,
+                evidence_numbers=[],
+                reason=reason,
+            )
+
+            assessments.append(
+                _serialize_assessment(
+                    question_number,
+                    assessment,
+                )
+            )
+
+            gaps.append(
+                f"{question.question} — missing: {reason}"
+            )
 
         return {
             **state,
+            "coverage_assessments": assessments,
             "research_sufficient": False,
             "research_gaps": gaps,
             "research_decision_reason": (
@@ -937,52 +584,28 @@ def research_sufficiency_node(
             ),
         }
 
-    # --------------------------------------------------------
-    # Evaluate each ORIGINAL research question independently
-    #
-    # Follow-up questions are NOT independent final
-    # requirements.
-    #
-    # Their evidence belongs to the parent question tree.
-    # --------------------------------------------------------
-
-    assessments = []
+    # Evaluate every original question independently.
+    assessment_records = []
 
     for position, (
         question_number,
         research_question,
-    ) in enumerate(
-        root_questions,
-        start=1,
-    ):
-
+    ) in enumerate(root_questions, start=1):
         print(
             f"\n  Research requirement "
             f"{position}/{len(root_questions)}"
         )
+        print(f"  Root question number: Q{question_number}")
 
-        print(
-            f"  Root question number: "
-            f"Q{question_number}"
+        evidence_with_numbers = _get_evidence_for_question_tree(
+            root_question_number=question_number,
+            research_questions=research_questions,
+            evidence=evidence,
         )
 
-        # ----------------------------------------------------
-        # Question-tree ownership
-        # ----------------------------------------------------
-
-        evidence_with_numbers = (
-            _get_evidence_for_question_tree(
-                root_question_number=question_number,
-                research_questions=research_questions,
-                evidence=evidence,
-            )
-        )
-
-        question_tree = (
-            _get_questions_for_question_tree(
-                root_question_number=question_number,
-                research_questions=research_questions,
-            )
+        question_tree = _get_questions_for_question_tree(
+            root_question_number=question_number,
+            research_questions=research_questions,
         )
 
         owned_global_numbers = [
@@ -1002,11 +625,7 @@ def research_sufficiency_node(
                 for number, _ in question_tree
             )
         )
-
-        print(
-            "  Evidence in question tree: "
-            f"{len(owned_evidence)}"
-        )
+        print(f"  Evidence in question tree: {len(owned_evidence)}")
 
         assessment = _evaluate_question(
             research_question=research_question,
@@ -1015,7 +634,7 @@ def research_sufficiency_node(
             question_tree=question_tree,
         )
 
-        assessments.append(
+        assessment_records.append(
             (
                 question_number,
                 research_question,
@@ -1023,135 +642,71 @@ def research_sufficiency_node(
             )
         )
 
-    # --------------------------------------------------------
-    # Build research gaps
-    # --------------------------------------------------------
+    # Persist assessments separately from human-readable gaps.
+    coverage_assessments = [
+        _serialize_assessment(question_number, assessment)
+        for question_number, _, assessment in assessment_records
+    ]
 
+    # Build gaps from the same decisions.
     research_gaps = []
 
-    for (
-        question_number,
-        question,
-        assessment,
-    ) in assessments:
-
+    for _, question, assessment in assessment_records:
         if assessment.covered:
-
             continue
 
-        reason = assessment.reason.strip()
-
-        if not reason:
-
-            reason = (
-                "Additional verified evidence "
-                "is required to answer this "
-                "research question."
-            )
-
-        gap = (
-            f"{question.question} "
-            f"— missing: "
-            f"{reason}"
+        reason = assessment.reason.strip() or (
+            "Additional verified evidence is required."
         )
 
-        if gap not in research_gaps:
+        gap = f"{question.question} — missing: {reason}"
 
-            research_gaps.append(
-                gap
-            )
+        if gap not in research_gaps:
+            research_gaps.append(gap)
 
     research_sufficient = not research_gaps
 
-    # --------------------------------------------------------
-    # Explanation
-    # --------------------------------------------------------
-
     if research_sufficient:
-
         reason = (
             "Every original research question is sufficiently "
             "supported by verified evidence, including evidence "
             "collected through adaptive follow-up research."
         )
-
     else:
-
-        uncovered_count = len(
-            research_gaps
-        )
-
         reason = (
-            f"{uncovered_count} original research question(s) "
+            f"{len(research_gaps)} original research question(s) "
             "still require additional verified evidence."
         )
 
-    # --------------------------------------------------------
-    # Logging
-    # --------------------------------------------------------
+    print(f"\n  Research sufficiency: {research_sufficient}")
+    print("  Coverage assessment:")
 
-    print(
-        "\n  Research sufficiency: "
-        f"{research_sufficient}"
-    )
+    for question_number, _, assessment in assessment_records:
+        status = "COVERED" if assessment.covered else "INSUFFICIENT"
 
-    print(
-        "  Coverage assessment:"
-    )
-
-    for (
-        question_number,
-        question,
-        assessment,
-    ) in assessments:
-
-        status = (
-            "COVERED"
-            if assessment.covered
-            else "INSUFFICIENT"
-        )
-
-        print(
-            f"    [Q{question_number}] "
-            f"{status}"
-        )
-
-        print(
-            f"        Reason: "
-            f"{assessment.reason}"
-        )
+        print(f"    [Q{question_number}] {status}")
+        print(f"        Reason: {assessment.reason}")
 
         if assessment.evidence_numbers:
-
             print(
                 "        Evidence: "
                 + ", ".join(
                     str(number)
-                    for number
-                    in assessment.evidence_numbers
+                    for number in assessment.evidence_numbers
                 )
             )
 
-    print(
-        "  Research gaps:"
-    )
+    print("  Research gaps:")
 
     if not research_gaps:
-
-        print(
-            "    None"
-        )
-
+        print("    None")
     else:
-
         for gap in research_gaps:
-
-            print(
-                f"    - {gap}"
-            )
+            print(f"    - {gap}")
 
     return {
         **state,
+        "coverage_assessments": coverage_assessments,
         "research_sufficient": research_sufficient,
         "research_gaps": research_gaps,
         "research_decision_reason": reason,

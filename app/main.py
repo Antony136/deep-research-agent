@@ -4,11 +4,13 @@ Entry point for the Deep Research Agent.
 Runs the complete research workflow and displays:
 - research progress summary
 - research decision
+- question-by-question coverage
 - unresolved research gaps
 - final evidence-linked research report
 """
 
 from app.graph.graph import build_research_graph
+from app.tools.citation_formatter import format_research_report
 
 
 def print_separator(
@@ -46,7 +48,7 @@ def print_research_decision(
         f"\nReason: {state['research_decision_reason']}"
     )
 
-    research_gaps = state["research_gaps"]
+    research_gaps = state.get("research_gaps", [])
 
     print("\nResearch gaps:")
 
@@ -64,16 +66,40 @@ def print_summary(
     print("RESEARCH SUMMARY")
     print_separator()
 
-    print(f"Research questions: {len(state['research_questions'])}")
-    print(f"Sources collected: {len(state['sources'])}")
-    print(f"Verified evidence: {len(state['evidence'])}")
+    print(
+        f"Research questions: "
+        f"{len(state['research_questions'])}"
+    )
+
+    print(
+        f"Sources collected: "
+        f"{len(state['sources'])}"
+    )
+
+    print(
+        f"Verified evidence: "
+        f"{len(state['evidence'])}"
+    )
+
     print(
         f"Research questions processed: "
         f"{state['current_question_index']}"
     )
-    print(f"Research round: {state['research_round']}")
-    print(f"Research complete: {state['research_complete']}")
-    print(f"Research sufficient: {state['research_sufficient']}")
+
+    print(
+        f"Research round: "
+        f"{state['research_round']}"
+    )
+
+    print(
+        f"Research complete: "
+        f"{state['research_complete']}"
+    )
+
+    print(
+        f"Research sufficient: "
+        f"{state['research_sufficient']}"
+    )
 
 
 def print_final_report(
@@ -89,80 +115,17 @@ def print_final_report(
         print("No final research report was generated.")
         return
 
-    # --------------------------------------------------------
-    # TITLE AND SUMMARY
-    # --------------------------------------------------------
+    formatted_report = format_research_report(
+        report=report,
+        evidence=state.get("evidence", []),
+    )
 
-    print(f"\nTitle:\n{report.title}")
-    print(f"\nSummary:\n{report.summary}")
+    print()
+    print(formatted_report)
 
-    # --------------------------------------------------------
-    # FINDINGS AND CITATIONS
-    # --------------------------------------------------------
-
-    print("\nFINDINGS")
-
-    evidence = state["evidence"]
-
-    if not report.findings:
-        print("No evidence-linked findings were generated.")
-
-    for index, finding in enumerate(
-        report.findings,
-        start=1,
-    ):
-        print_separator(char="-")
-
-        print(f"\nFinding {index}")
-        print(finding.text)
-
-        question_refs = ", ".join(
-            f"Q{number}"
-            for number in finding.research_question_numbers
-        )
-
-        evidence_refs = ", ".join(
-            f"E{number}"
-            for number in finding.evidence_numbers
-        )
-
-        print(f"\nResearch questions: {question_refs}")
-        print(f"Evidence references: {evidence_refs}")
-
-        print("\nSupporting evidence:")
-
-        for evidence_number in finding.evidence_numbers:
-            # The synthesizer validates these references before
-            # placing the report into the final graph state.
-            item = evidence[evidence_number - 1]
-
-            print(f"\n[E{evidence_number}] {item.claim}")
-            print(f"Research question: Q{item.research_question_number}")
-            print(f"Supporting passage: {item.supporting_text}")
-            print(f"Source: {item.source_url}")
-
-    # --------------------------------------------------------
-    # SOURCES
-    # --------------------------------------------------------
-
-    print_separator(char="-")
-    print("\nSOURCES")
-
-    if not report.sources:
-        print("No cited source URLs were included in the report.")
-
-    for index, source in enumerate(
-        report.sources,
-        start=1,
-    ):
-        print(f"[{index}] {source}")
-
-    # --------------------------------------------------------
-    # RAW REPORT OBJECT
-    # --------------------------------------------------------
-
-    print_separator(char="-")
-    print("\nFINAL REPORT OBJECT")
+    print()
+    print_separator()
+    print("FINAL REPORT OBJECT")
     print(report.model_dump_json(indent=2))
 
 
@@ -201,6 +164,7 @@ def main():
         "max_research_rounds": 3,
         "max_total_research_questions": 10,
         "research_gaps": [],
+        "coverage_assessments": [],
         "research_sufficient": False,
         "research_decision_reason": "",
         "report": None,
@@ -230,8 +194,15 @@ def main():
         f"{len(final_state['research_questions'])} questions"
     )
 
-    print(f"Sources collected: {len(final_state['sources'])}")
-    print(f"Verified evidence: {len(final_state['evidence'])}")
+    print(
+        f"Sources collected: "
+        f"{len(final_state['sources'])}"
+    )
+
+    print(
+        f"Verified evidence: "
+        f"{len(final_state['evidence'])}"
+    )
 
     print()
     print_research_decision(final_state)
