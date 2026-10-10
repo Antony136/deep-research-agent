@@ -1,74 +1,31 @@
 """
 Main LangGraph workflow for the Deep Research Agent.
 
-Current workflow:
+Human-in-the-loop checkpoints:
+1. Initial research plan approval.
+2. One-time authorization for initial web research.
+3. Optional adaptive follow-up question approval.
+4. Optional final report approval.
 
-    START
-      |
-      v
-   Planner
-      |
-      v
-  Researcher
-      |
-      v
-Evidence Extractor
-      |
-      v
-Evidence Verifier
-      |
-      v
-Research Sufficiency
-      |
-      v
- Planned questions remain?
-    /              \
-  yes               no
-   |                 |
-   v                 v
-Researcher       Is research sufficient?
-   |              /              \
-   |            yes               no
-   |             |                 |
-   |             |          Budget / round available?
-   |             |             /          \
-   |             |           yes            no
-   |             |            |              |
-   |             |            v              |
-   |             |      Adaptive Planner     |
-   |             |            |              |
-   |             |            v              |
-   |             |       Follow-up questions?|
-   |             |          /       \         |
-   |             |        yes        no       |
-   |             |         |          |       |
-   |             └─────────┘          |       |
-   |                                  |       |
-   └──────────────────────────────────┘       |
-                                              |
-                         ┌────────────────────┘
-                         |
-                         v
-                    FINAL SYNTHESIS
-                         |
-                         v
-                        END
-
-The research phase may finish because:
-- all required evidence was collected,
-- the research-question budget was reached,
-- the research-round limit was reached, or
-- adaptive planning produced no additional questions.
-
-Regardless of why research ends, the verified evidence is passed
-to the final synthesis node.
+The existing research, verification, sufficiency, and synthesis
+workflow is preserved.
 """
 
 from langgraph.graph import END, START, StateGraph
 
 from app.graph.nodes.adaptive_planner import adaptive_planner_node
+from app.graph.nodes.adaptive_review import adaptive_review_node
 from app.graph.nodes.evidence_extractor import evidence_extractor_node
 from app.graph.nodes.evidence_verifier import evidence_verifier_node
+from app.graph.nodes.final_report_review import (
+    final_report_review_node,
+)
+from app.graph.nodes.initial_plan_review import (
+    initial_plan_review_node,
+)
+from app.graph.nodes.initial_research_review import (
+    initial_research_review_node,
+)
 from app.graph.nodes.planner import planner_node
 from app.graph.nodes.researcher import researcher_node
 from app.graph.nodes.research_sufficiency import (
@@ -78,335 +35,296 @@ from app.graph.nodes.synthesizer import synthesis_node
 from app.graph.state import ResearchState
 
 
+# ============================================================
+# INITIAL HUMAN REVIEW ROUTING
+# ============================================================
+
+def route_after_initial_plan_review(
+    state: ResearchState,
+) -> str:
+    """Route according to the initial plan review decision."""
+
+    if state.get("research_complete", False):
+        print("\n[Router] Initial research plan was rejected.")
+        return "end"
+
+    if state.get("initial_plan_approved", False):
+        print("\n[Router] Initial research plan approved.")
+        return "research_authorization"
+
+    print("\n[Router] Revised plan requires another review.")
+    return "plan_review"
+
+
+def route_after_initial_research_review(
+    state: ResearchState,
+) -> str:
+    """Start web research only after authorization."""
+
+    if state.get("research_complete", False):
+        print("\n[Router] Research was stopped before starting.")
+        return "end"
+
+    if (
+        state.get("initial_research_approved", False)
+        and state.get("research_authorized", False)
+    ):
+        print("\n[Router] Web research authorized.")
+        return "research"
+
+    print("\n[Router] Web research was not authorized.")
+    return "end"
+
+
+# ============================================================
+# RESEARCH SUFFICIENCY ROUTING
+# ============================================================
+
 def should_continue_research(
     state: ResearchState,
 ) -> str:
-    """
-    Decide what should happen after research sufficiency
-    evaluation.
-
-    The original research plan always has priority.
-
-    Once the planned research is exhausted:
-
-        sufficient -> synthesis
-        insufficient -> adaptive planner
-
-    Adaptive research is allowed only while the absolute
-    research-question budget has not been reached.
-    """
+    """Decide whether to research, adapt the plan, or synthesize."""
 
     current_index = state["current_question_index"]
     total_questions = len(state["research_questions"])
     max_total_questions = state["max_total_research_questions"]
 
-    # ------------------------------------------------------
-    # 1. Complete the existing research plan first.
-    # ------------------------------------------------------
-
     if current_index < total_questions:
-
+        print("\n[Router] Planned research questions remain.")
         print(
-            "\n[Router] Planned research questions remain."
+            f"[Router] Progress: {current_index}/{total_questions}"
         )
-
-        print(
-            "[Router] Continuing with the current research plan."
-        )
-
-        print(
-            f"[Router] Progress: "
-            f"{current_index}/{total_questions}"
-        )
-
         return "research"
 
-    # ------------------------------------------------------
-    # 2. The planned research is exhausted.
-    #    If sufficient, move directly to synthesis.
-    # ------------------------------------------------------
-
     if state["research_sufficient"]:
-
-        print(
-            "\n[Router] All planned research questions "
-            "have been processed."
-        )
-
-        print(
-            "[Router] Research is sufficient."
-        )
-
-        print(
-            "[Router] Moving to final synthesis."
-        )
-
+        print("\n[Router] Research is sufficient.")
         return "synthesis"
-
-    # ------------------------------------------------------
-    # 3. Hard total-question budget.
-    #
-    # No additional research can be started once the
-    # absolute question budget has been consumed.
-    #
-    # The current evidence is still passed to synthesis.
-    # ------------------------------------------------------
 
     if total_questions >= max_total_questions:
-
-        print(
-            "\n[Router] Maximum research-question budget "
-            "has been reached."
-        )
-
-        print(
-            f"[Router] Questions in plan: "
-            f"{total_questions}"
-        )
-
-        print(
-            f"[Router] Maximum allowed: "
-            f"{max_total_questions}"
-        )
-
-        print(
-            "[Router] Ending research phase."
-        )
-
-        print(
-            "[Router] Moving to final synthesis with "
-            "the current verified evidence."
-        )
-
+        print("\n[Router] Maximum question budget reached.")
         return "synthesis"
 
-    # ------------------------------------------------------
-    # 4. Planned research is exhausted but evidence
-    #    is still insufficient.
-    #
-    # Adaptive planning is allowed only if both:
-    #
-    #   - the research-round limit allows another round
-    #   - the total-question budget has capacity
-    # ------------------------------------------------------
-
     if state["research_round"] < state["max_research_rounds"]:
-
-        remaining_capacity = (
-            max_total_questions - total_questions
-        )
-
-        print(
-            "\n[Router] All planned research questions "
-            "have been processed."
-        )
-
-        print(
-            "[Router] Research is still insufficient."
-        )
-
-        print(
-            "[Router] Starting adaptive planning."
-        )
-
-        print(
-            f"[Router] Remaining question capacity: "
-            f"{remaining_capacity}"
-        )
-
+        print("\n[Router] Research remains insufficient.")
+        print("[Router] Starting adaptive planning.")
         return "adaptive_planner"
 
-    # ------------------------------------------------------
-    # 5. Research-round safety limit reached.
-    #
-    # Move to synthesis rather than ending the application.
-    # ------------------------------------------------------
-
-    print(
-        "\n[Router] Maximum research rounds reached."
-    )
-
-    print(
-        "[Router] Ending research phase."
-    )
-
-    print(
-        "[Router] Moving to final synthesis with "
-        "the current verified evidence."
-    )
-
+    print("\n[Router] Maximum research rounds reached.")
     return "synthesis"
 
 
-def should_continue_after_adaptive_planner(
+# ============================================================
+# ADAPTIVE REVIEW ROUTING
+# ============================================================
+
+def should_review_adaptive_questions(
     state: ResearchState,
 ) -> str:
-    """
-    Decide what should happen after adaptive planning.
+    """Choose human review or automatic acceptance of proposals."""
 
-    The adaptive planner may add follow-up questions.
+    proposed_questions = state.get(
+        "proposed_research_questions",
+        [],
+    )
 
-    The absolute question budget is checked again here so
-    the researcher can never receive more questions than
-    the configured application limit.
-    """
-
-    questions = state["research_questions"]
-    current_index = state["current_question_index"]
+    current_questions = state["research_questions"]
     max_total_questions = state["max_total_research_questions"]
 
-    # ------------------------------------------------------
-    # 1. Check whether the adaptive planner actually added
-    #    usable questions.
-    # ------------------------------------------------------
-
-    if current_index >= len(questions):
-
-        print(
-            "\n[Router] Adaptive planner created "
-            "no new research questions."
-        )
-
-        print(
-            "[Router] Ending research phase."
-        )
-
-        print(
-            "[Router] Moving to final synthesis."
-        )
-
+    if not proposed_questions:
+        print("\n[Router] No usable follow-up questions proposed.")
         return "synthesis"
 
-    # ------------------------------------------------------
-    # 2. Enforce the absolute question budget.
-    #
-    # This protects the workflow even if an adaptive planner
-    # implementation accidentally creates too many questions.
-    # ------------------------------------------------------
+    available_capacity = max_total_questions - len(current_questions)
 
-    if len(questions) > max_total_questions:
-
-        print(
-            "\n[Router] Adaptive planner exceeded the "
-            "research-question budget."
-        )
-
-        print(
-            f"[Router] Generated questions: "
-            f"{len(questions)}"
-        )
-
-        print(
-            f"[Router] Maximum allowed: "
-            f"{max_total_questions}"
-        )
-
-        print(
-            "[Router] Ending research phase."
-        )
-
-        print(
-            "[Router] Moving to final synthesis with "
-            "the current verified evidence."
-        )
-
+    if available_capacity <= 0:
+        print("\n[Router] No capacity for follow-up questions.")
         return "synthesis"
 
-    # ------------------------------------------------------
-    # 3. Valid adaptive questions exist.
-    # ------------------------------------------------------
+    # Human review is optional. The adaptive review node
+    # remains the single place where proposals are accepted.
+    if state.get("require_adaptive_research_approval", True):
+        print("\n[Router] Follow-up questions need human review.")
+        return "review"
 
-    print(
-        "\n[Router] Adaptive planner created "
-        "new research questions."
+    print("\n[Router] Automatically accepting valid follow-up questions.")
+    return "auto_accept"
+
+
+def auto_accept_adaptive_questions(
+    state: ResearchState,
+) -> dict:
+    """
+    Accept validated adaptive proposals when human approval
+    is disabled, while enforcing the question budget.
+    """
+
+    current_questions = list(state["research_questions"])
+    proposed_questions = state.get(
+        "proposed_research_questions",
+        [],
     )
 
-    print(
-        "[Router] Continuing with researcher."
-    )
+    max_total_questions = state["max_total_research_questions"]
+    capacity = max(0, max_total_questions - len(current_questions))
+    accepted_questions = proposed_questions[:capacity]
 
-    print(
-        f"[Router] Total questions in plan: "
-        f"{len(questions)}/{max_total_questions}"
-    )
+    if not accepted_questions:
+        return {
+            "proposed_research_questions": [],
+            "adaptive_review_decision": {
+                "action": "reject",
+                "reason": "No valid follow-up questions could be accepted.",
+            },
+        }
 
+    updated_questions = current_questions + accepted_questions
+
+    return {
+        "research_questions": updated_questions,
+        "current_question_index": len(current_questions),
+        "proposed_research_questions": [],
+        "adaptive_review_decision": {
+            "action": "approve",
+            "reason": "Follow-up questions accepted automatically.",
+        },
+        "research_complete": False,
+    }
+
+
+def should_continue_after_adaptive_review(
+    state: ResearchState,
+) -> str:
+    """Continue only if adaptive questions were accepted."""
+
+    decision = state.get("adaptive_review_decision") or {}
+
+    if decision.get("action") != "approve":
+        print("\n[Router] Follow-up questions were not approved.")
+        return "synthesis"
+
+    current_index = state["current_question_index"]
+    total_questions = len(state["research_questions"])
+    max_total_questions = state["max_total_research_questions"]
+
+    if current_index >= total_questions:
+        print("\n[Router] No approved follow-up questions remain.")
+        return "synthesis"
+
+    if total_questions > max_total_questions:
+        print("\n[Router] Question budget exceeded.")
+        return "synthesis"
+
+    print("\n[Router] Approved follow-up questions will be researched.")
+    print(
+        f"[Router] Total questions: "
+        f"{total_questions}/{max_total_questions}"
+    )
     return "research"
 
 
-def build_research_graph():
+# ============================================================
+# FINAL REPORT REVIEW ROUTING
+# ============================================================
+
+def route_after_final_report_review(
+    state: ResearchState,
+) -> str:
+    """Finish after approval or return to research when requested."""
+
+    decision = state.get("final_report_review_decision")
+
+    # When final-report approval is disabled, the review node
+    # marks the report approved automatically.
+    if state.get("final_report_approved", False):
+        print("\n[Router] Final report approved.")
+        return "end"
+
+    if not decision:
+        print("\n[Router] No final-report decision was recorded.")
+        return "end"
+
+    if decision.get("action") != "research_more":
+        print("\n[Router] Final-report review did not request more research.")
+        return "end"
+
+    total_questions = len(state["research_questions"])
+    max_total_questions = state["max_total_research_questions"]
+    research_round = state["research_round"]
+    max_research_rounds = state["max_research_rounds"]
+
+    if (
+        total_questions < max_total_questions
+        and research_round < max_research_rounds
+    ):
+        print("\n[Router] Returning to adaptive research planning.")
+        return "adaptive_planner"
+
+    print("\n[Router] Research budgets exhausted.")
+    print("[Router] Ending with the current report.")
+    return "end"
+
+
+# ============================================================
+# GRAPH CONSTRUCTION
+# ============================================================
+
+def build_research_graph(checkpointer=None):
     """
     Build and compile the complete research workflow.
+
+    A checkpointer is required for resumable human-in-the-loop
+    interrupts.
     """
 
     graph = StateGraph(ResearchState)
 
+    # Register nodes.
+    graph.add_node("planner", planner_node)
+    graph.add_node("initial_plan_review", initial_plan_review_node)
     graph.add_node(
-        "planner",
-        planner_node,
+        "initial_research_review",
+        initial_research_review_node,
     )
-
+    graph.add_node("researcher", researcher_node)
+    graph.add_node("evidence_extractor", evidence_extractor_node)
+    graph.add_node("evidence_verifier", evidence_verifier_node)
+    graph.add_node("research_sufficiency", research_sufficiency_node)
+    graph.add_node("adaptive_planner", adaptive_planner_node)
+    graph.add_node("adaptive_review", adaptive_review_node)
     graph.add_node(
-        "researcher",
-        researcher_node,
+        "auto_accept_adaptive",
+        auto_accept_adaptive_questions,
+    )
+    graph.add_node("synthesizer", synthesis_node)
+    graph.add_node("final_report_review", final_report_review_node)
+
+    # Initial plan and research authorization.
+    graph.add_edge(START, "planner")
+    graph.add_edge("planner", "initial_plan_review")
+
+    graph.add_conditional_edges(
+        "initial_plan_review",
+        route_after_initial_plan_review,
+        {
+            "plan_review": "initial_plan_review",
+            "research_authorization": "initial_research_review",
+            "end": END,
+        },
     )
 
-    graph.add_node(
-        "evidence_extractor",
-        evidence_extractor_node,
+    graph.add_conditional_edges(
+        "initial_research_review",
+        route_after_initial_research_review,
+        {
+            "research": "researcher",
+            "end": END,
+        },
     )
 
-    graph.add_node(
-        "evidence_verifier",
-        evidence_verifier_node,
-    )
-
-    graph.add_node(
-        "research_sufficiency",
-        research_sufficiency_node,
-    )
-
-    graph.add_node(
-        "adaptive_planner",
-        adaptive_planner_node,
-    )
-
-    graph.add_node(
-        "synthesizer",
-        synthesis_node,
-    )
-
-    # ------------------------------------------------------
-    # Main workflow
-    # ------------------------------------------------------
-
-    graph.add_edge(
-        START,
-        "planner",
-    )
-
-    graph.add_edge(
-        "planner",
-        "researcher",
-    )
-
-    graph.add_edge(
-        "researcher",
-        "evidence_extractor",
-    )
-
-    graph.add_edge(
-        "evidence_extractor",
-        "evidence_verifier",
-    )
-
-    graph.add_edge(
-        "evidence_verifier",
-        "research_sufficiency",
-    )
-
-    # ------------------------------------------------------
-    # Research sufficiency routing
-    # ------------------------------------------------------
+    # Research and evidence processing.
+    graph.add_edge("researcher", "evidence_extractor")
+    graph.add_edge("evidence_extractor", "evidence_verifier")
+    graph.add_edge("evidence_verifier", "research_sufficiency")
 
     graph.add_conditional_edges(
         "research_sufficiency",
@@ -418,26 +336,45 @@ def build_research_graph():
         },
     )
 
-    # ------------------------------------------------------
-    # Adaptive research routing
-    # ------------------------------------------------------
-
+    # Adaptive planning and approval.
     graph.add_conditional_edges(
         "adaptive_planner",
-        should_continue_after_adaptive_planner,
+        should_review_adaptive_questions,
+        {
+            "review": "adaptive_review",
+            "auto_accept": "auto_accept_adaptive",
+            "synthesis": "synthesizer",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "adaptive_review",
+        should_continue_after_adaptive_review,
         {
             "research": "researcher",
             "synthesis": "synthesizer",
         },
     )
 
-    # ------------------------------------------------------
-    # Final synthesis
-    # ------------------------------------------------------
-
-    graph.add_edge(
-        "synthesizer",
-        END,
+    graph.add_conditional_edges(
+        "auto_accept_adaptive",
+        should_continue_after_adaptive_review,
+        {
+            "research": "researcher",
+            "synthesis": "synthesizer",
+        },
     )
 
-    return graph.compile()
+    # Synthesis and optional final report approval.
+    graph.add_edge("synthesizer", "final_report_review")
+
+    graph.add_conditional_edges(
+        "final_report_review",
+        route_after_final_report_review,
+        {
+            "adaptive_planner": "adaptive_planner",
+            "end": END,
+        },
+    )
+
+    return graph.compile(checkpointer=checkpointer)

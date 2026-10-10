@@ -3,9 +3,13 @@ LangGraph state for the Deep Research Agent.
 
 The state is the shared data structure that flows through
 every node in the research workflow.
+
+Human-in-the-loop fields store approval settings, decisions,
+and proposed adaptive questions without mixing them into
+the active research plan prematurely.
 """
 
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from app.schemas.research import (
     Evidence,
@@ -16,10 +20,7 @@ from app.schemas.research import (
 
 
 class CoverageAssessmentState(TypedDict):
-    """
-    Persist the sufficiency evaluator's decision for one
-    original research question.
-    """
+    """Sufficiency assessment for one research question."""
 
     research_question_number: int
     covered: bool
@@ -27,79 +28,124 @@ class CoverageAssessmentState(TypedDict):
     reason: str
 
 
-class ResearchState(TypedDict):
-    """
-    Complete state of a research session.
-    """
+class AdaptiveReviewDecision(TypedDict):
+    """Decision about proposed follow-up research questions."""
 
+    action: Literal["approve", "reject"]
+    reason: str
+
+
+class FinalReportReviewDecision(TypedDict):
+    """Decision about the generated research report."""
+
+    action: Literal["approve", "research_more"]
+    reason: str
+
+
+class ResearchState(TypedDict):
+    """Complete state of a research session."""
+
+    # ========================================================
     # USER REQUEST
+    # ========================================================
+
     question: str
 
+    # ========================================================
+    # HUMAN-IN-THE-LOOP SETTINGS
+    # ========================================================
+
+    require_initial_plan_approval: bool
+    require_initial_research_approval: bool
+    require_adaptive_research_approval: bool
+    require_final_report_approval: bool
+
+    # Initial approval decisions
+    initial_plan_approved: bool
+    initial_research_approved: bool
+
+    # True after the user authorizes web research.
+    # This authorization is reused throughout the session.
+    research_authorized: bool
+
+    # Final report approval and explicit decision
+    final_report_approved: bool
+    final_report_review_decision: (
+        FinalReportReviewDecision | None
+    )
+
+    # ========================================================
     # RESEARCH PLAN
+    # ========================================================
+
+    # Only accepted questions belong in the active plan.
     research_questions: list[ResearchQuestion]
 
+    # ========================================================
+    # ADAPTIVE RESEARCH PROPOSALS
+    # ========================================================
+
+    # Proposed questions stay separate until approved.
+    proposed_research_questions: list[ResearchQuestion]
+
+    adaptive_review_decision: AdaptiveReviewDecision | None
+
+    # ========================================================
     # CURRENT RESEARCH QUESTION
-    #
-    # current_question_index is the pointer used by the
-    # workflow to determine which question should be
-    # researched next.
-    #
-    # active_research_question is the question whose
-    # sources/evidence are currently being processed.
-    #
-    # These are intentionally separate because the workflow
-    # advances the next-question pointer before later nodes
-    # finish processing the current question.
+    # ========================================================
+
     active_research_question: ResearchQuestion | None
 
-    # 1-based number of the research question currently
-    # being processed.
+    # One-based number of the active research question.
     active_research_question_number: int | None
 
-    # Sources belonging to the research question currently
-    # being processed.
+    # Sources found for the active question.
     current_sources: list[Source]
 
+    # ========================================================
     # RESEARCH DATA
+    # ========================================================
+
+    # All sources collected during the session.
     sources: list[Source]
 
-    # Evidence extracted by the LLM for the current
-    # research question, before deterministic validation.
+    # Newly extracted evidence awaiting validation.
     pending_evidence: list[Evidence]
 
-    # Evidence that passed deterministic validation
-    # and is trusted by the rest of the pipeline.
+    # Evidence that passed deterministic validation.
     evidence: list[Evidence]
 
+    # ========================================================
     # WORKFLOW CONTROL
+    # ========================================================
+
+    # Pointer to the next question to process.
     current_question_index: int
+
+    # Indicates that the research workflow should stop.
     research_complete: bool
 
-    # ADAPTIVE RESEARCH
-    #
-    # research_round = 1 means the initial research plan.
-    #
-    # If the initial plan is exhausted and the evidence is
-    # still insufficient, the adaptive planner can create a
-    # targeted follow-up plan.
+    # ========================================================
+    # ADAPTIVE RESEARCH LIMITS
+    # ========================================================
+
     research_round: int
     max_research_rounds: int
     max_total_research_questions: int
 
+    # ========================================================
     # SUFFICIENCY ASSESSMENTS
-    #
-    # Retain the evaluator's decision for each original
-    # research question so later nodes can use the same
-    # decision instead of independently guessing coverage.
+    # ========================================================
+
     coverage_assessments: list[CoverageAssessmentState]
 
-    # Information that the sufficiency evaluator determined
-    # is still missing from the research.
     research_gaps: list[str]
 
-    # Overall sufficiency decision
     research_sufficient: bool
     research_decision_reason: str
 
+    # ========================================================
     # FINAL OUTPUT
+    # ========================================================
+
     report: ResearchReport | None

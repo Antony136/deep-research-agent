@@ -5,9 +5,9 @@ Creates focused follow-up research questions when the current
 evidence is insufficient to answer one or more original
 research questions.
 
-The planner is intentionally domain-independent. It must infer
-the missing research dimension from the unresolved gap rather
-than relying on topic-specific rules.
+Validated follow-up questions are stored separately in
+proposed_research_questions. They are not added to the active
+research plan until the human-review node approves them.
 """
 
 import os
@@ -34,76 +34,59 @@ BASE_URL = os.getenv(
     "http://localhost:11434",
 )
 
-
 MAX_FOLLOW_UP_QUESTIONS = 3
 
 
 class AdaptiveFollowUpQuestion(BaseModel):
-    """
-    A follow-up question created to resolve one specific
-    research gap.
-    """
+    """A follow-up question targeting one specific research gap."""
 
     question: str = Field(
         ...,
         description=(
-            "A specific, narrower research question that "
-            "directly investigates missing information from "
-            "one unresolved research gap."
+            "A focused research question that investigates "
+            "missing information from an unresolved research gap."
         ),
     )
 
     search_queries: list[str] = Field(
         ...,
         description=(
-            "Focused search queries that directly investigate "
-            "the follow-up question."
+            "Focused web search queries for the follow-up question."
         ),
     )
 
     parent_question_number: int = Field(
         ...,
         description=(
-            "The 1-based number of the original research "
-            "question whose unresolved gap this follow-up "
-            "addresses."
+            "The 1-based number of the original research question "
+            "whose unresolved gap this follow-up addresses."
         ),
     )
 
 
 class AdaptiveResearchOutput(BaseModel):
-    """
-    Structured output produced by the adaptive planner.
-    """
+    """Structured output from the adaptive planner."""
 
     research_questions: list[AdaptiveFollowUpQuestion] = Field(
         default_factory=list,
-        description=(
-            "Focused follow-up research questions needed to "
-            "resolve the identified research gaps."
-        ),
+        description="Focused follow-up research questions.",
     )
 
 
 class FollowUpValidationOutput(BaseModel):
-    """
-    Structured judgment of whether a proposed follow-up
-    question is genuinely useful.
-    """
+    """LLM judgment of whether a proposed follow-up is useful."""
 
     valid: bool = Field(
         ...,
         description=(
-            "Whether the follow-up question is sufficiently "
-            "focused, relevant, and useful for resolving the gap."
+            "Whether the follow-up is focused, relevant, "
+            "and useful for resolving the research gap."
         ),
     )
 
     reason: str = Field(
         ...,
-        description=(
-            "Brief explanation for the validation decision."
-        ),
+        description="Brief explanation of the validation decision.",
     )
 
 
@@ -113,11 +96,9 @@ model = ChatOllama(
     temperature=0,
 )
 
-
 structured_model = model.with_structured_output(
     AdaptiveResearchOutput
 )
-
 
 validation_model = model.with_structured_output(
     FollowUpValidationOutput
@@ -131,84 +112,21 @@ planning_prompt = ChatPromptTemplate.from_messages(
             """
 You are the adaptive planning component of a deep research agent.
 
-The research agent has already investigated several original
-research questions.
+Create focused follow-up questions to investigate unresolved
+research gaps.
 
-Some original questions remain insufficiently supported.
-
-Your job is to create focused follow-up research questions
-that investigate the missing information.
-
-The planner must work for arbitrary research domains.
-
-STRICT RULES:
-
-1. Every follow-up question must directly address one
-   unresolved research gap.
-
-2. Every follow-up question must be a genuine sub-question
-   of its parent research question.
-
-3. A follow-up question must be narrower than its parent
-   question.
-
-4. A follow-up question must investigate missing information,
-   not merely repeat or rephrase the parent question.
-
-5. A follow-up question must investigate missing information,
-   not merely repeat or rephrase the research gap.
-
-6. Do not answer the question yourself.
-
-7. Do not introduce a new topic that is not required by the
-   parent question or its unresolved gap.
-
-8. Do not broaden the research scope.
-
-9. Preserve the intended meaning and scope of the parent
-   question.
-
-10. Each follow-up must have exactly one valid original
-    parent question.
-
-11. The parent_question_number must refer to an ORIGINAL
-    research question, not another follow-up question.
-
-12. Do not create follow-ups for sufficiently covered
-    questions.
-
-13. Search queries must be directly useful for investigating
-    the follow-up question.
-
-14. Search queries should contain concrete concepts from the
-    follow-up question rather than vague generic wording.
-
-15. Prefer a small number of highly focused follow-ups over
-    many broad questions.
-
-16. If a gap can be resolved by investigating multiple
-    distinct dimensions, create separate focused questions
-    only when the dimensions are genuinely independent.
-
-17. Do not manufacture missing dimensions that are not implied
-    by the unresolved gap.
-
-18. Do not use outside knowledge to invent a research scope.
-
-19. A follow-up that is substantially equivalent to an
-    existing research question is invalid.
-
-20. A follow-up that merely changes the wording of an existing
-    question is invalid.
-
-21. A follow-up that asks for "more information" without
-    identifying what information is missing is invalid.
-
-22. Every follow-up must be independently searchable on the
-    web.
-
-23. The final follow-up questions should make measurable
-    progress toward resolving the unresolved gap.
+Rules:
+1. Every follow-up must address a specific unresolved gap.
+2. Every follow-up must belong to one original parent question.
+3. The parent number must refer to the original research plan.
+4. Do not create follow-ups for sufficiently covered questions.
+5. Do not repeat, rephrase, or broaden existing questions.
+6. Do not introduce unrelated topics.
+7. Do not answer the questions yourself.
+8. Search queries must be specific and independently useful.
+9. Prefer a few focused questions over many broad questions.
+10. Return no question when a gap cannot be investigated
+    through a specific, independently searchable question.
 """,
         ),
         (
@@ -218,32 +136,25 @@ Original research questions:
 
 {research_questions}
 
-
-Identified unresolved research gaps:
+Unresolved research gaps:
 
 {research_gaps}
 
-
-Maximum follow-up questions allowed:
+Maximum follow-up questions:
 
 {max_questions}
 
+Create follow-up questions for the highest-priority gaps.
 
-Create focused follow-up research questions for the highest
-priority unresolved gaps.
+Each question must:
+- identify the missing information;
+- be narrower than its parent question;
+- preserve the parent's scope;
+- identify the correct original parent question number;
+- provide focused search queries;
+- avoid repeating existing questions.
 
-For every follow-up:
-
-- identify the exact missing information
-- make the question narrower than its parent
-- preserve the parent's scope
-- assign the correct original parent question number
-- provide focused search queries
-- avoid repeating existing questions
-- avoid restating the gap as a question
-
-Return no follow-up when a gap cannot be converted into a
-specific, independently researchable sub-question.
+Return no follow-up if no useful question can be generated.
 """,
         ),
     ]
@@ -257,35 +168,18 @@ validation_prompt = ChatPromptTemplate.from_messages(
             """
 You are a strict validator for an adaptive research planner.
 
-Determine whether a proposed follow-up research question is
-valid.
+A candidate is valid only if it:
+1. Belongs to the assigned original parent question.
+2. Directly addresses the unresolved gap.
+3. Is narrower than the parent question.
+4. Investigates missing information.
+5. Is not a duplicate or rewording of an existing question.
+6. Introduces no unrelated topic.
+7. Is independently researchable.
+8. Could materially help resolve the gap.
 
-A valid follow-up must satisfy ALL of these conditions:
-
-1. It belongs to the assigned original parent question.
-
-2. It directly addresses the unresolved research gap.
-
-3. It is narrower than the parent question.
-
-4. It investigates missing information rather than repeating
-   information that has already been requested.
-
-5. It is not merely a rewording of the parent question.
-
-6. It is not merely a rewording of the research gap.
-
-7. It does not introduce an unrelated topic.
-
-8. It is independently researchable.
-
-9. It can provide evidence that would materially help resolve
-   the gap.
-
-Reject the candidate if any condition fails.
-
-Judge only from the supplied parent question, gap, and
-candidate. Do not use outside knowledge.
+Reject a candidate if any condition fails.
+Judge only from the supplied information.
 """,
         ),
         (
@@ -295,18 +189,15 @@ Original parent research question:
 
 {parent_question}
 
-
 Unresolved research gap:
 
 {gap}
-
 
 Proposed follow-up question:
 
 {candidate_question}
 
-
-Determine whether this proposed follow-up is valid.
+Determine whether the candidate is valid.
 """,
         ),
     ]
@@ -317,12 +208,8 @@ planning_chain = planning_prompt | structured_model
 validation_chain = validation_prompt | validation_model
 
 
-def _normalize_text(
-    text: str,
-) -> str:
-    """
-    Normalize text for deterministic comparison.
-    """
+def _normalize_text(text: str) -> str:
+    """Normalize text for deterministic comparison."""
 
     return re.sub(
         r"\s+",
@@ -331,32 +218,21 @@ def _normalize_text(
     )
 
 
-def _tokenize(
-    text: str,
-) -> set[str]:
-    """
-    Return normalized content tokens.
-    """
-
-    normalized = _normalize_text(text)
+def _tokenize(text: str) -> set[str]:
+    """Return normalized content tokens."""
 
     return {
         token
         for token in re.findall(
             r"[a-z0-9]+",
-            normalized,
+            _normalize_text(text),
         )
         if len(token) > 2
     }
 
 
-def _token_similarity(
-    first: str,
-    second: str,
-) -> float:
-    """
-    Calculate Jaccard similarity between two texts.
-    """
+def _token_similarity(first: str, second: str) -> float:
+    """Calculate Jaccard similarity between two texts."""
 
     first_tokens = _tokenize(first)
     second_tokens = _tokenize(second)
@@ -364,27 +240,20 @@ def _token_similarity(
     if not first_tokens or not second_tokens:
         return 0.0
 
-    intersection = first_tokens & second_tokens
-    union = first_tokens | second_tokens
-
-    return len(intersection) / len(union)
+    return len(first_tokens & second_tokens) / len(
+        first_tokens | second_tokens
+    )
 
 
 def _is_duplicate_question(
     candidate_question: str,
     existing_questions: list[ResearchQuestion],
 ) -> bool:
-    """
-    Reject questions that duplicate or almost duplicate
-    previously investigated questions.
-    """
+    """Reject duplicate or near-duplicate questions."""
 
-    normalized_candidate = _normalize_text(
-        candidate_question
-    )
+    normalized_candidate = _normalize_text(candidate_question)
 
     for existing in existing_questions:
-
         normalized_existing = _normalize_text(
             existing.question
         )
@@ -392,12 +261,10 @@ def _is_duplicate_question(
         if normalized_candidate == normalized_existing:
             return True
 
-        similarity = _token_similarity(
+        if _token_similarity(
             candidate_question,
             existing.question,
-        )
-
-        if similarity >= 0.80:
+        ) >= 0.80:
             return True
 
     return False
@@ -407,44 +274,23 @@ def _is_question_too_broad(
     candidate_question: str,
     parent_question: str,
 ) -> bool:
-    """
-    Detect candidates that are effectively the same scope
-    as the parent question.
-    """
+    """Detect candidates that effectively restate the parent."""
 
-    candidate_tokens = _tokenize(
-        candidate_question
-    )
-
-    parent_tokens = _tokenize(
-        parent_question
-    )
+    candidate_tokens = _tokenize(candidate_question)
+    parent_tokens = _tokenize(parent_question)
 
     if not candidate_tokens or not parent_tokens:
         return True
 
-    overlap = (
-        candidate_tokens & parent_tokens
-    )
+    overlap = candidate_tokens & parent_tokens
 
-    parent_coverage = (
-        len(overlap) / len(parent_tokens)
-    )
+    parent_coverage = len(overlap) / len(parent_tokens)
+    candidate_coverage = len(overlap) / len(candidate_tokens)
 
-    candidate_coverage = (
-        len(overlap) / len(candidate_tokens)
-    )
-
-    # If the candidate contains almost all of the parent's
-    # concepts while adding very little new specificity,
-    # it is probably a restatement.
-    if (
+    return (
         parent_coverage >= 0.80
         and candidate_coverage >= 0.65
-    ):
-        return True
-
-    return False
+    )
 
 
 def _extract_gap_parent_number(
@@ -452,10 +298,9 @@ def _extract_gap_parent_number(
     research_questions: list[ResearchQuestion],
 ) -> int | None:
     """
-    Determine which original research question owns a gap.
+    Find the original question associated with a gap.
 
-    The gap format is expected to contain the original
-    research question followed by '-- missing:'.
+    Supports the existing '— missing:' gap format.
     """
 
     gap_question = gap.split(
@@ -463,37 +308,22 @@ def _extract_gap_parent_number(
         1,
     )[0].strip()
 
-    normalized_gap = _normalize_text(
-        gap_question
-    )
+    normalized_gap = _normalize_text(gap_question)
 
     for index, question in enumerate(
         research_questions,
         start=1,
     ):
-
-        if _normalize_text(
-            question.question
-        ) == normalized_gap:
-
+        if _normalize_text(question.question) == normalized_gap:
             return index
 
     return None
 
 
-def _gap_priority_score(
-    gap: str,
-) -> int:
-    """
-    Assign a deterministic priority score to an unresolved gap.
+def _gap_priority_score(gap: str) -> int:
+    """Assign a deterministic priority score to a gap."""
 
-    The score is based only on the wording of the gap.
-    """
-
-    normalized_gap = _normalize_text(
-        gap
-    )
-
+    normalized_gap = _normalize_text(gap)
     score = 0
 
     high_priority_terms = (
@@ -527,15 +357,17 @@ def _gap_priority_score(
         "factors",
     )
 
-    for term in high_priority_terms:
+    score += sum(
+        3
+        for term in high_priority_terms
+        if term in normalized_gap
+    )
 
-        if term in normalized_gap:
-            score += 3
-
-    for term in medium_priority_terms:
-
-        if term in normalized_gap:
-            score += 1
+    score += sum(
+        1
+        for term in medium_priority_terms
+        if term in normalized_gap
+    )
 
     return score
 
@@ -544,53 +376,32 @@ def _prioritize_gaps(
     gaps: list[str],
     research_questions: list[ResearchQuestion],
 ) -> list[tuple[str, int | None, int]]:
-    """
-    Order unresolved gaps by research importance.
-    """
+    """Order gaps by priority, preserving original order for ties."""
 
     prioritized = []
 
-    for original_index, gap in enumerate(
-        gaps
-    ):
-
+    for original_index, gap in enumerate(gaps):
         parent_number = _extract_gap_parent_number(
             gap=gap,
             research_questions=research_questions,
-        )
-
-        score = _gap_priority_score(
-            gap
         )
 
         prioritized.append(
             (
                 gap,
                 parent_number,
-                score,
+                _gap_priority_score(gap),
                 original_index,
             )
         )
 
     prioritized.sort(
-        key=lambda item: (
-            -item[2],
-            item[3],
-        )
+        key=lambda item: (-item[2], item[3])
     )
 
     return [
-        (
-            gap,
-            parent_number,
-            score,
-        )
-        for (
-            gap,
-            parent_number,
-            score,
-            _,
-        ) in prioritized
+        (gap, parent_number, score)
+        for gap, parent_number, score, _ in prioritized
     ]
 
 
@@ -598,34 +409,24 @@ def _valid_gap_parent_numbers(
     gaps: list[str],
     research_questions: list[ResearchQuestion],
 ) -> set[int]:
-    """
-    Return original question numbers that currently have
-    unresolved gaps.
-    """
+    """Return original question numbers that have unresolved gaps."""
 
-    parent_numbers: set[int] = set()
-
-    for gap in gaps:
-
-        parent_number = _extract_gap_parent_number(
-            gap=gap,
-            research_questions=research_questions,
-        )
-
-        if parent_number is not None:
-            parent_numbers.add(
-                parent_number
+    return {
+        parent_number
+        for gap in gaps
+        if (
+            parent_number := _extract_gap_parent_number(
+                gap,
+                research_questions,
             )
-
-    return parent_numbers
+        ) is not None
+    }
 
 
 def _format_research_questions(
     research_questions: list[ResearchQuestion],
 ) -> str:
-    """
-    Format all existing research questions.
-    """
+    """Format the current plan for the LLM."""
 
     if not research_questions:
         return "No research questions."
@@ -636,18 +437,14 @@ def _format_research_questions(
         research_questions,
         start=1,
     ):
-
-        if question.parent_question_number is None:
-            relationship = "original"
-        else:
-            relationship = (
-                f"follow-up to Q"
-                f"{question.parent_question_number}"
-            )
+        relationship = (
+            "original"
+            if question.parent_question_number is None
+            else f"follow-up to Q{question.parent_question_number}"
+        )
 
         lines.append(
-            f"Q{index} [{relationship}]: "
-            f"{question.question}"
+            f"Q{index} [{relationship}]: {question.question}"
         )
 
     return "\n".join(lines)
@@ -657,16 +454,14 @@ def _format_research_gaps(
     gaps: list[str],
     research_questions: list[ResearchQuestion],
 ) -> str:
-    """
-    Format unresolved gaps in priority order.
-    """
+    """Format unresolved gaps in priority order."""
 
     if not gaps:
         return "No research gaps."
 
     prioritized_gaps = _prioritize_gaps(
-        gaps=gaps,
-        research_questions=research_questions,
+        gaps,
+        research_questions,
     )
 
     lines = []
@@ -679,21 +474,19 @@ def _format_research_gaps(
         prioritized_gaps,
         start=1,
     ):
-
         parent_label = (
             f"Q{parent_number}"
             if parent_number is not None
             else "UNKNOWN"
         )
 
-        if priority_score >= 3:
-            priority_label = "HIGH"
-
-        elif priority_score >= 1:
-            priority_label = "MEDIUM"
-
-        else:
-            priority_label = "LOW"
+        priority_label = (
+            "HIGH"
+            if priority_score >= 3
+            else "MEDIUM"
+            if priority_score >= 1
+            else "LOW"
+        )
 
         lines.append(
             f"GAP {index} [{priority_label}]\n"
@@ -709,12 +502,7 @@ def _build_generic_fallback_question(
     parent_question: str,
     parent_number: int,
 ) -> ResearchQuestion:
-    """
-    Build a domain-independent fallback question.
-
-    This fallback deliberately does not assume anything about
-    the research domain.
-    """
+    """Build a domain-independent fallback question."""
 
     missing_part = gap.split(
         "— missing:",
@@ -726,7 +514,7 @@ def _build_generic_fallback_question(
 
     question = (
         "What specific evidence, factors, criteria, or mechanisms "
-        f"are needed to resolve the following missing aspect of "
+        "are needed to resolve the following missing aspect of "
         f"the research question: {missing_part}"
     )
 
@@ -747,14 +535,11 @@ def _repair_search_queries(
     candidate_question: str,
     queries: list[str],
 ) -> list[str]:
-    """
-    Clean and deduplicate candidate search queries.
-    """
+    """Clean and deduplicate search queries."""
 
     repaired = []
 
     for query in queries:
-
         if not query or not query.strip():
             continue
 
@@ -768,12 +553,9 @@ def _repair_search_queries(
             continue
 
         if cleaned not in repaired:
-            repaired.append(
-                cleaned
-            )
+            repaired.append(cleaned)
 
     if not repaired:
-
         repaired = [
             candidate_question,
             f"{candidate_question} evidence",
@@ -787,17 +569,11 @@ def _validate_candidate(
     gap: str,
     parent_question: str,
 ) -> bool:
-    """
-    Validate a candidate using both deterministic checks and
-    a semantic LLM validator.
-    """
+    """Apply deterministic checks and semantic LLM validation."""
 
     question = candidate.question.strip()
 
-    if not question:
-        return False
-
-    if not candidate.search_queries:
+    if not question or not candidate.search_queries:
         return False
 
     if _is_question_too_broad(
@@ -806,12 +582,11 @@ def _validate_candidate(
     ):
         print(
             "  Rejected follow-up question: "
-            "candidate is too broad or restates the parent."
+            "candidate is too broad or restates its parent."
         )
         return False
 
     try:
-
         validation = validation_chain.invoke(
             {
                 "parent_question": parent_question,
@@ -819,27 +594,19 @@ def _validate_candidate(
                 "candidate_question": question,
             }
         )
-
     except Exception as exc:
-
         print(
             "  Follow-up semantic validation failed: "
             f"{exc}"
         )
-
         return False
 
     if not validation.valid:
-
         print(
             "  Rejected follow-up question: "
             "semantic validation failed."
         )
-
-        print(
-            f"    Reason: {validation.reason}"
-        )
-
+        print(f"    Reason: {validation.reason}")
         return False
 
     return True
@@ -851,26 +618,17 @@ def _build_fallback_questions(
     valid_parent_numbers: set[int],
     max_questions: int,
 ) -> list[ResearchQuestion]:
-    """
-    Build deterministic domain-independent follow-ups when
-    the LLM planner produces no usable questions.
-    """
+    """Build deterministic fallback candidates for unresolved gaps."""
 
-    fallback_questions: list[ResearchQuestion] = []
-
-    prioritized_gaps = _prioritize_gaps(
-        gaps=gaps,
-        research_questions=research_questions,
-    )
-
+    fallback_questions = []
     used_parent_numbers: set[int] = set()
 
-    for (
-        gap,
-        parent_number,
-        _,
-    ) in prioritized_gaps:
+    prioritized_gaps = _prioritize_gaps(
+        gaps,
+        research_questions,
+    )
 
+    for gap, parent_number, _ in prioritized_gaps:
         if parent_number is None:
             continue
 
@@ -896,13 +654,8 @@ def _build_fallback_questions(
         ):
             continue
 
-        fallback_questions.append(
-            candidate
-        )
-
-        used_parent_numbers.add(
-            parent_number
-        )
+        fallback_questions.append(candidate)
+        used_parent_numbers.add(parent_number)
 
         if len(fallback_questions) >= max_questions:
             break
@@ -910,50 +663,33 @@ def _build_fallback_questions(
     return fallback_questions
 
 
-def adaptive_planner_node(
-    state,
-) -> dict:
+def adaptive_planner_node(state) -> dict:
     """
-    Create follow-up research questions from unresolved gaps.
+    Generate and validate proposed follow-up questions.
+
+    The active research plan is deliberately left unchanged.
+    The human-review node decides whether proposals are accepted.
     """
 
-    gaps = state.get(
-        "research_gaps",
-        [],
-    )
-
-    research_questions = state.get(
-        "research_questions",
-        [],
-    )
+    gaps = state.get("research_gaps", [])
+    research_questions = state.get("research_questions", [])
 
     remaining_capacity = (
-        state.get(
-            "max_total_research_questions",
-            10,
-        )
+        state.get("max_total_research_questions", 10)
         - len(research_questions)
     )
 
     max_questions = min(
         MAX_FOLLOW_UP_QUESTIONS,
-        max(
-            0,
-            remaining_capacity,
-        ),
+        max(0, remaining_capacity),
     )
 
-    print(
-        "\n[Node] adaptive_planner"
-    )
-
-    print(
-        f"  Research gaps identified: {len(gaps)}"
-    )
+    print("\n[Node] adaptive_planner")
+    print(f"  Research gaps identified: {len(gaps)}")
 
     prioritized_gaps = _prioritize_gaps(
-        gaps=gaps,
-        research_questions=research_questions,
+        gaps,
+        research_questions,
     )
 
     for index, (
@@ -964,15 +700,13 @@ def adaptive_planner_node(
         prioritized_gaps,
         start=1,
     ):
-
-        if priority_score >= 3:
-            priority_label = "HIGH"
-
-        elif priority_score >= 1:
-            priority_label = "MEDIUM"
-
-        else:
-            priority_label = "LOW"
+        priority_label = (
+            "HIGH"
+            if priority_score >= 3
+            else "MEDIUM"
+            if priority_score >= 1
+            else "LOW"
+        )
 
         parent_label = (
             f"Q{parent_number}"
@@ -981,45 +715,24 @@ def adaptive_planner_node(
         )
 
         print(
-            f"    [{index}] "
-            f"{priority_label} "
-            f"({parent_label}) "
-            f"{gap}"
+            f"    [{index}] {priority_label} "
+            f"({parent_label}) {gap}"
         )
+
+    def finish_without_proposals() -> dict:
+        return {
+            "proposed_research_questions": [],
+            "adaptive_review_decision": None,
+            "research_round": state.get("research_round", 0) + 1,
+        }
 
     if not gaps:
-
-        print(
-            "  No research gaps remain."
-        )
-
-        return {
-            **state,
-            "research_round": (
-                state.get(
-                    "research_round",
-                    0,
-                )
-                + 1
-            ),
-        }
+        print("  No research gaps remain.")
+        return finish_without_proposals()
 
     if max_questions <= 0:
-
-        print(
-            "  No remaining capacity for follow-up questions."
-        )
-
-        return {
-            **state,
-            "research_round": (
-                state.get(
-                    "research_round",
-                    0,
-                )
-                + 1
-            ),
-        }
+        print("  No remaining capacity for follow-up questions.")
+        return finish_without_proposals()
 
     formatted_questions = _format_research_questions(
         research_questions
@@ -1031,7 +744,6 @@ def adaptive_planner_node(
     )
 
     try:
-
         response = planning_chain.invoke(
             {
                 "research_questions": formatted_questions,
@@ -1039,39 +751,31 @@ def adaptive_planner_node(
                 "max_questions": max_questions,
             }
         )
-
         candidates = response.research_questions
-
     except Exception as exc:
-
-        print(
-            f"  Adaptive planner LLM error: {exc}"
-        )
-
+        print(f"  Adaptive planner LLM error: {exc}")
         candidates = []
 
     valid_parent_numbers = _valid_gap_parent_numbers(
-        gaps=gaps,
-        research_questions=research_questions,
+        gaps,
+        research_questions,
     )
 
     follow_up_candidates = []
 
     for candidate in candidates:
-
         question = candidate.question.strip()
+        parent_number = candidate.parent_question_number
 
-        parent_number = (
-            candidate.parent_question_number
-        )
-
-        if parent_number not in valid_parent_numbers:
-
+        if (
+            parent_number not in valid_parent_numbers
+            or parent_number < 1
+            or parent_number > len(research_questions)
+        ):
             print(
                 "  Rejected follow-up question: "
                 f"invalid parent question number Q{parent_number}."
             )
-
             continue
 
         parent_question = research_questions[
@@ -1081,50 +785,33 @@ def adaptive_planner_node(
         gap_for_parent = next(
             (
                 gap
-                for (
-                    gap,
-                    gap_parent_number,
-                    _,
-                ) in prioritized_gaps
+                for gap, gap_parent_number, _ in prioritized_gaps
                 if gap_parent_number == parent_number
             ),
             "",
         )
 
         if not gap_for_parent:
-
             print(
                 "  Rejected follow-up question: "
                 "no matching unresolved gap."
             )
-
             continue
 
         if _is_duplicate_question(
             candidate_question=question,
             existing_questions=research_questions,
         ):
-
             print(
                 "  Rejected follow-up question: "
                 "duplicate or near-duplicate."
             )
-
-            print(
-                f"    Question: {question}"
-            )
-
+            print(f"    Question: {question}")
             continue
-
-        search_queries = [
-            query.strip()
-            for query in candidate.search_queries
-            if query and query.strip()
-        ]
 
         repaired_queries = _repair_search_queries(
             candidate_question=question,
-            queries=search_queries,
+            queries=candidate.search_queries,
         )
 
         candidate.search_queries = repaired_queries
@@ -1134,20 +821,16 @@ def adaptive_planner_node(
             gap=gap_for_parent,
             parent_question=parent_question,
         ):
-
             continue
 
-        priority = 0
-
-        for (
-            _,
-            gap_parent_number,
-            score,
-        ) in prioritized_gaps:
-
-            if gap_parent_number == parent_number:
-                priority = score
-                break
+        priority = next(
+            (
+                score
+                for _, gap_parent_number, score in prioritized_gaps
+                if gap_parent_number == parent_number
+            ),
+            0,
+        )
 
         follow_up_candidates.append(
             (
@@ -1163,21 +846,14 @@ def adaptive_planner_node(
         reverse=True,
     )
 
-    follow_up_questions: list[ResearchQuestion] = []
-
+    follow_up_questions = []
     seen_parent_numbers: set[int] = set()
 
-    for (
-        _,
-        candidate,
-        question,
-        search_queries,
-    ) in follow_up_candidates:
+    for _, candidate, question, search_queries in follow_up_candidates:
+        parent_number = candidate.parent_question_number
 
-        parent_number = (
-            candidate.parent_question_number
-        )
-
+        # Keep at most one follow-up for each original parent
+        # in a single adaptive planning round.
         if parent_number in seen_parent_numbers:
             continue
 
@@ -1189,22 +865,15 @@ def adaptive_planner_node(
             )
         )
 
-        seen_parent_numbers.add(
-            parent_number
-        )
+        seen_parent_numbers.add(parent_number)
 
         if len(follow_up_questions) >= max_questions:
             break
 
     if not follow_up_questions:
-
         print(
-            "  Qwen did not produce usable follow-up questions."
-        )
-
-        print(
-            "  Building domain-independent follow-up "
-            "questions from the highest-priority gaps."
+            "  Qwen produced no usable follow-ups. "
+            "Trying domain-independent fallback questions."
         )
 
         fallback_candidates = _build_fallback_questions(
@@ -1214,11 +883,11 @@ def adaptive_planner_node(
             max_questions=max_questions,
         )
 
-        for candidate in fallback_candidates:
+        for fallback in fallback_candidates:
+            parent_number = fallback.parent_question_number
 
-            parent_number = (
-                candidate.parent_question_number
-            )
+            if parent_number is None:
+                continue
 
             parent_question = research_questions[
                 parent_number - 1
@@ -1227,90 +896,51 @@ def adaptive_planner_node(
             gap_for_parent = next(
                 (
                     gap
-                    for (
-                        gap,
-                        gap_parent_number,
-                        _,
-                    ) in prioritized_gaps
+                    for gap, gap_parent_number, _ in prioritized_gaps
                     if gap_parent_number == parent_number
                 ),
                 "",
             )
 
+            candidate = AdaptiveFollowUpQuestion(
+                question=fallback.question,
+                search_queries=fallback.search_queries,
+                parent_question_number=parent_number,
+            )
+
             if _validate_candidate(
-                candidate=AdaptiveFollowUpQuestion(
-                    question=candidate.question,
-                    search_queries=candidate.search_queries,
-                    parent_question_number=parent_number,
-                ),
+                candidate=candidate,
                 gap=gap_for_parent,
                 parent_question=parent_question,
             ):
-                follow_up_questions.append(
-                    candidate
-                )
+                follow_up_questions.append(fallback)
 
             if len(follow_up_questions) >= max_questions:
                 break
 
     if not follow_up_questions:
-
-        print(
-            "  No valid follow-up research questions "
-            "could be generated."
-        )
-
-        return {
-            **state,
-            "research_round": (
-                state.get(
-                    "research_round",
-                    0,
-                )
-                + 1
-            ),
-        }
-
-    start_number = len(
-        research_questions
-    ) + 1
+        print("  No valid follow-up questions could be generated.")
+        return finish_without_proposals()
 
     print(
         f"  Generated {len(follow_up_questions)} "
-        "follow-up research question(s)."
+        "proposed follow-up question(s)."
     )
 
-    for offset, question in enumerate(
-        follow_up_questions,
-    ):
+    start_number = len(research_questions) + 1
 
-        assigned_number = (
-            start_number + offset
-        )
-
+    for offset, question in enumerate(follow_up_questions):
         print(
-            f"    Q{assigned_number} "
+            f"    Proposed Q{start_number + offset} "
             f"(parent Q{question.parent_question_number}): "
             f"{question.question}"
         )
 
-    updated_questions = (
-        research_questions
-        + follow_up_questions
-    )
-
+    # CRITICAL: do not append proposals to research_questions.
+    # The adaptive-review node will make that decision.
     return {
-        **state,
-        "research_questions": updated_questions,
-        "current_question_index": len(
-            research_questions
-        ),
-        "research_round": (
-            state.get(
-                "research_round",
-                0,
-            )
-            + 1
-        ),
+        "proposed_research_questions": follow_up_questions,
+        "adaptive_review_decision": None,
+        "research_round": state.get("research_round", 0) + 1,
         "research_complete": False,
     }
