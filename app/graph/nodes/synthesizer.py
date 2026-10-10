@@ -3,9 +3,16 @@ Final synthesis node for the Deep Research Agent.
 
 Builds a source-grounded report from verified evidence while
 preserving research sufficiency decisions and unresolved gaps.
+
+Each synthesized finding must pass:
+1. Structural validation.
+2. Evidence-reference validation.
+3. Semantic support validation against its cited passages.
+4. Research-question lineage validation.
 """
 
 import os
+import re
 from collections import defaultdict
 
 from dotenv import load_dotenv
@@ -20,6 +27,7 @@ from app.schemas.research import (
     ResearchFinding,
     ResearchReport,
 )
+from app.tools.evidence_validator import validate_claim_support
 
 
 # ------------------------------------------------------------
@@ -92,6 +100,13 @@ Rules:
 - Copy those local evidence numbers into evidence_numbers.
 - Never invent evidence numbers or source URLs.
 - Prefer distinct, informative findings over repetition.
+- Each finding must be a clear, grammatical, self-contained
+  statement expressing one defensible claim.
+- Use normal spacing between words and correct punctuation.
+- Do not concatenate words or produce sentence fragments.
+- Avoid vague statements that merely restate the research topic.
+- Do not turn a recommendation into an established fact.
+- Do not generalize beyond what the supporting text establishes.
 - If evidence is insufficient, do not manufacture a conclusion.
 - Return an empty findings list only when no defensible finding
   can be produced from the supplied evidence.
@@ -117,6 +132,7 @@ For every finding:
 - evidence_numbers must contain the LOCAL evidence numbers shown
   in the evidence list, such as 1, 2, or 3.
 - Do not use global evidence numbers from another question.
+- Include only claims that the cited evidence actually supports.
 """,
         ),
     ]
@@ -140,6 +156,9 @@ Do not introduce new factual claims.
 If there are no validated findings, state that clearly.
 Do not describe sufficient evidence as proof that a question
 is unresolved.
+
+Describe the validated report as it actually stands.
+Do not claim findings or coverage that are absent from the input.
 """,
         ),
         (
@@ -165,6 +184,60 @@ Write the final report title and summary.
 
 
 # ------------------------------------------------------------
+# TEXT NORMALIZATION
+# ------------------------------------------------------------
+
+def _normalize_finding_text(text: str) -> str:
+    """
+    Normalize whitespace and common punctuation-spacing issues.
+
+    This is formatting cleanup, not factual correction.
+    """
+
+    text = re.sub(r"\s+", " ", text).strip()
+
+    text = re.sub(
+        r"\s+([,.;:!?])",
+        r"\1",
+        text,
+    )
+
+    text = re.sub(
+        r"([,.;:!?])(?=[A-Za-z])",
+        r"\1 ",
+        text,
+    )
+
+    return text.strip()
+
+
+def _finding_deduplication_key(text: str) -> str:
+    """Build a normalized key for textual deduplication."""
+
+    normalized = _normalize_finding_text(text).casefold()
+
+    return re.sub(
+        r"[^\w\s]",
+        "",
+        normalized,
+    ).strip()
+
+
+def _finding_identity(
+    finding: ResearchFinding,
+) -> tuple[str, tuple[int, ...]]:
+    """
+    Deduplicate identical wording only within the same
+    original-question lineage.
+    """
+
+    return (
+        _finding_deduplication_key(finding.text),
+        tuple(sorted(set(finding.research_question_numbers))),
+    )
+
+
+# ------------------------------------------------------------
 # QUESTION HELPERS
 # ------------------------------------------------------------
 
@@ -183,6 +256,37 @@ def _build_question_roots(
     ]
 
 
+def _resolve_original_question_number(
+    question_number: int,
+    questions: list,
+) -> int | None:
+    """
+    Resolve a question or follow-up to its original root.
+
+    Invalid references and parent cycles return None.
+    """
+
+    visited = set()
+
+    while question_number is not None:
+        if question_number in visited:
+            return None
+
+        if not (1 <= question_number <= len(questions)):
+            return None
+
+        visited.add(question_number)
+
+        question = questions[question_number - 1]
+
+        if question.parent_question_number is None:
+            return question_number
+
+        question_number = question.parent_question_number
+
+    return None
+
+
 def _format_question_evidence(
     question_number: int,
     evidence_items: list[Evidence],
@@ -196,7 +300,7 @@ def _format_question_evidence(
         start=1,
     ):
         lines.append(
-            f"[E{local_number}] "
+            f"[E{local_number}]\n"
             f"Claim: {evidence.claim}\n"
             f"Source: {evidence.source_url}\n"
             f"Supporting text: {evidence.supporting_text}"
@@ -239,30 +343,66 @@ def _validate_findings(
     findings: list[ResearchFinding],
     question_number: int,
     local_to_global_evidence: dict[int, int],
+    evidence_by_global_number: dict[int, Evidence],
 ) -> list[ResearchFinding]:
     """
-    Validate local evidence references and map them globally.
+    Validate finding text, citations, and semantic support.
 
-    Synthesis is isolated to one original question. Therefore,
-    the current question number is assigned by the application
-    rather than trusting the LLM to return it correctly.
+    Each cited passage is validated independently to avoid
+    exceeding the semantic validator's supporting-text limit.
+
+    A finding is retained only when at least one cited passage
+    independently supports its complete factual claim. Only
+    evidence that passes semantic validation is retained.
+
+    Question lineage is assigned by the application.
     """
 
     validated = []
     seen = set()
 
     for finding in findings:
-        text = finding.text.strip()
+        text = _normalize_finding_text(finding.text)
 
         if not text:
             continue
 
-        if not finding.evidence_numbers:
+        if not re.search(r"[A-Za-z]", text):
+            print(
+                f"  Rejected finding for Q{question_number}: "
+                "finding contains no usable text."
+            )
+            continue
+
+        words = re.findall(r"\b[\w'-]+\b", text)
+
+        if len(words) < 4:
+            print(
+                f"  Rejected finding for Q{question_number}: "
+                "finding is too short."
+            )
+            continue
+
+        if any(
+            first.casefold() == second.casefold()
+            for first, second in zip(words, words[1:])
+        ):
+            print(
+                f"  Rejected finding for Q{question_number}: "
+                "consecutive repeated words detected."
+            )
             continue
 
         local_numbers = finding.evidence_numbers
 
-        # Reject a finding if any local evidence reference is invalid.
+        if not local_numbers:
+            print(
+                f"  Rejected finding for Q{question_number}: "
+                "no evidence references supplied."
+            )
+            continue
+
+        # Reject the finding if any supplied citation is invalid.
         if any(
             number not in local_to_global_evidence
             for number in local_numbers
@@ -283,24 +423,104 @@ def _validate_findings(
         if not global_evidence_numbers:
             continue
 
-        # Deduplicate repeated findings while retaining their citations.
-        key = text.casefold()
+        # Resolve only the evidence explicitly cited by the finding.
+        cited_evidence = []
+
+        missing_evidence = False
+
+        for global_number in global_evidence_numbers:
+            evidence_item = evidence_by_global_number.get(
+                global_number
+            )
+
+            if evidence_item is None:
+                missing_evidence = True
+                break
+
+            cited_evidence.append(
+                (global_number, evidence_item)
+            )
+
+        if missing_evidence or not cited_evidence:
+            print(
+                f"  Rejected finding for Q{question_number}: "
+                "cited evidence could not be resolved."
+            )
+            continue
+
+        # Validate each passage separately. This prevents several
+        # passages from being concatenated into a string that
+        # exceeds the validator's maximum supporting-text length.
+        supported_evidence_numbers = []
+        validation_reasons = []
+
+        for global_number, evidence_item in cited_evidence:
+            supporting_text = evidence_item.supporting_text.strip()
+
+            if not supporting_text:
+                validation_reasons.append(
+                    f"E{global_number}: supporting text is empty."
+                )
+                continue
+
+            try:
+                semantically_supported, validation_reason = (
+                    validate_claim_support(
+                        claim=text,
+                        supporting_text=supporting_text,
+                    )
+                )
+
+            except Exception:
+                # Fail closed for this passage while allowing the
+                # remaining cited passages to be checked.
+                semantically_supported = False
+                validation_reason = (
+                    "Semantic validation failed unexpectedly."
+                )
+
+            if semantically_supported:
+                supported_evidence_numbers.append(
+                    global_number
+                )
+            else:
+                validation_reasons.append(
+                    f"E{global_number}: {validation_reason}"
+                )
+
+        # A complete claim must be supported by at least one of
+        # its cited passages. Unsupported citations are discarded.
+        if not supported_evidence_numbers:
+            reason = (
+                "; ".join(validation_reasons)
+                or "No cited passage established semantic support."
+            )
+
+            print(
+                f"  Rejected finding for Q{question_number}: "
+                "semantic support was not established. "
+                f"Reason: {reason}"
+            )
+            continue
+
+        key = _finding_deduplication_key(text)
 
         if key in seen:
             continue
 
         seen.add(key)
 
+        # Assign lineage in application code and retain only the
+        # evidence references that passed semantic validation.
         validated.append(
             ResearchFinding(
                 text=text,
                 research_question_numbers=[question_number],
-                evidence_numbers=global_evidence_numbers,
+                evidence_numbers=supported_evidence_numbers,
             )
         )
 
     return validated
-
 
 # ------------------------------------------------------------
 # QUESTION-LEVEL SYNTHESIS
@@ -312,7 +532,7 @@ def _synthesize_original_question(
     evidence_items: list[Evidence],
     global_evidence_numbers: list[int],
 ) -> list[ResearchFinding]:
-    """Synthesize validated findings for one original question."""
+    """Synthesize and validate findings for one original question."""
 
     if not evidence_items:
         print(
@@ -323,7 +543,7 @@ def _synthesize_original_question(
     if len(evidence_items) != len(global_evidence_numbers):
         print(
             f"Evidence mapping mismatch for Q{question_number}; "
-            "skipping synthesis for this question."
+            "skipping synthesis."
         )
         return []
 
@@ -332,6 +552,14 @@ def _synthesize_original_question(
         for local_number, global_number in enumerate(
             global_evidence_numbers,
             start=1,
+        )
+    }
+
+    evidence_by_global_number = {
+        global_number: item
+        for global_number, item in zip(
+            global_evidence_numbers,
+            evidence_items,
         )
     }
 
@@ -361,12 +589,14 @@ def _synthesize_original_question(
         findings=response.findings,
         question_number=question_number,
         local_to_global_evidence=local_to_global_evidence,
+        evidence_by_global_number=evidence_by_global_number,
     )
 
     print(
         f"  Q{question_number}: "
         f"{len(response.findings)} proposed finding(s), "
-        f"{len(findings)} validated finding(s)."
+        f"{len(findings)} findings passed structural and "
+        "semantic validation."
     )
 
     return findings
@@ -394,30 +624,14 @@ def _get_question_assessments(
     return assessments
 
 
-def _gap_matches_question(
-    gap: str,
-    question_number: int,
-    question_text: str,
-) -> bool:
-    """Match a research gap to its original question."""
-
-    normalized_gap = gap.strip().lower()
-    normalized_question = question_text.strip().lower()
-
-    if normalized_gap.startswith(f"q{question_number}:"):
-        return True
-
-    return normalized_gap.startswith(normalized_question)
-
-
 def _build_coverage(
     roots: list[tuple[int, object]],
     findings: list[ResearchFinding],
     assessments: dict[int, dict],
 ) -> list[ResearchCoverage]:
     """
-    Determine coverage using both validated findings and
-    persisted sufficiency assessments.
+    Determine coverage from sufficiency assessments and
+    findings that passed validation.
     """
 
     coverage = []
@@ -433,7 +647,8 @@ def _build_coverage(
         has_findings = bool(question_findings)
 
         is_sufficient = bool(
-            assessment and assessment.get("covered", False)
+            assessment
+            and assessment.get("covered", False)
         )
 
         reason = (
@@ -446,14 +661,17 @@ def _build_coverage(
             status = "supported"
             explanation = (
                 "The sufficiency evaluator judged the evidence "
-                "sufficient, and validated findings address this question."
+                "sufficient, and findings passed structural and "
+                "semantic support validation. This remains a "
+                "model-assisted assessment, not a guarantee of truth."
             )
 
         elif has_findings:
             status = "partially_supported"
             explanation = (
-                "Some validated findings address this question, "
-                "but the available evidence was not judged sufficient."
+                "Some findings passed validation, but the available "
+                "evidence was not judged sufficient to answer "
+                "the complete research question."
             )
 
             if reason:
@@ -462,9 +680,9 @@ def _build_coverage(
         else:
             status = "unresolved"
             explanation = (
-                "No validated findings address this question. "
-                "The available evidence cannot be presented as a "
-                "validated answer."
+                "No findings passed validation for this question. "
+                "The available evidence cannot be presented as "
+                "a validated answer."
             )
 
             if reason:
@@ -489,6 +707,22 @@ def _build_coverage(
         )
 
     return coverage
+
+
+def _gap_matches_question(
+    gap: str,
+    question_number: int,
+    question_text: str,
+) -> bool:
+    """Match a research gap to its original question."""
+
+    normalized_gap = gap.strip().lower()
+    normalized_question = question_text.strip().lower()
+
+    if normalized_gap.startswith(f"q{question_number}:"):
+        return True
+
+    return normalized_gap.startswith(normalized_question)
 
 
 def _merge_research_gaps(
@@ -517,9 +751,20 @@ def _merge_research_gaps(
             merged.append(gap)
             continue
 
-        assessment = assessments.get(matched_question_number)
+        question_coverage = next(
+            (
+                item
+                for item in coverage
+                if item.research_question_number
+                == matched_question_number
+            ),
+            None,
+        )
 
-        if assessment is not None and assessment.get("covered", False):
+        if (
+            question_coverage is not None
+            and question_coverage.status == "supported"
+        ):
             continue
 
         merged.append(gap)
@@ -586,7 +831,8 @@ def _validate_report(
     Validate evidence references, question lineage, coverage,
     gaps, and source URLs.
 
-    Only sources cited by validated findings are included.
+    Semantic support is checked before findings reach this
+    function. This function enforces structural integrity.
     """
 
     questions = research_questions or []
@@ -605,7 +851,7 @@ def _validate_report(
         number for number, _ in roots
     }
 
-    # Validate parent references.
+    # Validate the parent structure of the research plan.
     for number, question in enumerate(questions, start=1):
         parent = question.parent_question_number
 
@@ -629,42 +875,14 @@ def _validate_report(
                 "Evidence references an unknown research question."
             )
 
-    question_by_number = {
-        number: question
-        for number, question in enumerate(questions, start=1)
-    }
-
-    def original_question_number(
-        question_number: int,
-    ) -> int | None:
-        """Resolve a question or follow-up to its original root."""
-
-        visited = set()
-
-        while question_number is not None:
-            if question_number in visited:
-                return None
-
-            visited.add(question_number)
-
-            question = question_by_number.get(question_number)
-
-            if question is None:
-                return None
-
-            if question.parent_question_number is None:
-                return question_number
-
-            question_number = question.parent_question_number
-
-        return None
-
     validated_findings = []
+    seen_finding_keys = set()
 
     for finding in report.findings:
+        text = _normalize_finding_text(finding.text)
         evidence_numbers = finding.evidence_numbers
 
-        if not finding.text.strip() or not evidence_numbers:
+        if not text or not evidence_numbers:
             continue
 
         if any(
@@ -677,8 +895,9 @@ def _validate_report(
             root_number
             for number in evidence_numbers
             if (
-                root_number := original_question_number(
-                    evidence[number - 1].research_question_number
+                root_number := _resolve_original_question_number(
+                    evidence[number - 1].research_question_number,
+                    questions,
                 )
             ) is not None
         }
@@ -687,39 +906,48 @@ def _validate_report(
             finding.research_question_numbers
         )
 
+        # Derive missing lineage from cited evidence only.
         if not supplied_questions:
             supplied_questions = derived_questions
 
-        elif not supplied_questions.issubset(valid_question_numbers):
+        if not supplied_questions:
             raise ValueError(
-                "Finding references an invalid research question."
+                f"Finding has no research-question references: {text}"
             )
 
-        if not supplied_questions:
+        if not supplied_questions.issubset(
+            valid_question_numbers
+        ):
+            raise ValueError(
+                f"Finding references an invalid research question: {text}"
+            )
+
+        if not supplied_questions.issubset(derived_questions):
+            raise ValueError(
+                "Finding question reference does not belong to "
+                f"the lineage of its cited evidence: {text}"
+            )
+
+        finding_key = (
+            _finding_deduplication_key(text),
+            tuple(sorted(supplied_questions)),
+        )
+
+        if finding_key in seen_finding_keys:
             continue
 
-        # Each cited evidence item must belong to the claimed root
-        # question or one of its follow-up questions.
-        for number in evidence_numbers:
-            evidence_root = original_question_number(
-                evidence[number - 1].research_question_number
-            )
-
-            if evidence_root not in supplied_questions:
-                raise ValueError(
-                    "Evidence does not belong to the finding's "
-                    "research question lineage."
-                )
+        seen_finding_keys.add(finding_key)
 
         validated_findings.append(
             ResearchFinding(
-                text=finding.text.strip(),
+                text=text,
                 research_question_numbers=sorted(supplied_questions),
                 evidence_numbers=sorted(set(evidence_numbers)),
             )
         )
 
-    # Rebuild coverage from validated findings.
+    # Rebuild coverage from findings and the existing sufficiency
+    # assessment. Findings alone do not prove research sufficiency.
     validated_coverage = []
 
     for question_number, question in roots:
@@ -741,31 +969,35 @@ def _validate_report(
             None,
         )
 
-        if existing is not None:
-            # Preserve an existing assessment, but never claim a
-            # question is supported when no validated finding exists.
-            if not finding_numbers:
-                status = "unresolved"
-                explanation = (
-                    "No validated findings address this question."
-                )
-            else:
-                status = existing.status
-                explanation = existing.explanation
+        if not finding_numbers:
+            status = "unresolved"
+            explanation = (
+                "No validated findings address this question."
+            )
 
-        elif finding_numbers:
-            # Backward-compatible fallback: when no coverage
-            # assessment exists, validated evidence-backed findings
-            # establish supported coverage.
+            if existing is not None and existing.explanation:
+                explanation += (
+                    f" Previous assessment: {existing.explanation}"
+                )
+
+        elif existing is None:
+            # Backward-compatible fallback for direct callers
+            # that provide validated findings but no coverage.
             status = "supported"
             explanation = (
                 "Validated findings address this question."
             )
 
+
+        elif existing.status == "supported":
+            status = "supported"
+            explanation = existing.explanation
+
         else:
-            status = "unresolved"
-            explanation = (
-                "No validated findings address this question."
+            status = "partially_supported"
+            explanation = existing.explanation or (
+                "Some validated findings address this question, "
+                "but the evidence was not judged sufficient."
             )
 
         validated_coverage.append(
@@ -777,8 +1009,6 @@ def _validate_report(
                 explanation=explanation,
             )
         )
-
-
 
     # Include only sources cited by validated findings.
     referenced_evidence_numbers = {
@@ -794,15 +1024,15 @@ def _validate_report(
         )
     )
 
-    # Preserve caller-supplied gaps and model-generated report gaps.
+    # Preserve caller-supplied gaps and report-generated gaps.
     preserved_gaps = list(
         dict.fromkeys(
             (research_gaps or []) + report.research_gaps
         )
     )
 
-    # Remove question-specific gaps when validated coverage supports
-    # the question; keep gaps for partial or unresolved questions.
+    # Remove question-specific gaps only when final coverage is
+    # supported. Preserve unrelated/global research gaps.
     filtered_gaps = []
 
     for gap in preserved_gaps:
@@ -838,7 +1068,7 @@ def _validate_report(
         if ":" in gap
     }
 
-    # Ensure each partially supported or unresolved question has a gap.
+    # Ensure every partial or unresolved question has a gap.
     for item in validated_coverage:
         if item.status == "supported":
             continue
@@ -889,32 +1119,18 @@ def synthesis_node(
     evidence_numbers_by_question = defaultdict(list)
 
     for evidence_number, item in enumerate(evidence, start=1):
-        if not (
-            1 <= item.research_question_number <= len(questions)
-        ):
+        root_number = _resolve_original_question_number(
+            item.research_question_number,
+            questions,
+        )
+
+        if root_number is None:
             continue
 
-        root_number = item.research_question_number
-        visited = set()
-
-        while root_number is not None:
-            if root_number in visited:
-                root_number = None
-                break
-
-            visited.add(root_number)
-            current_question = questions[root_number - 1]
-
-            if current_question.parent_question_number is None:
-                break
-
-            root_number = current_question.parent_question_number
-
-        if root_number is not None:
-            evidence_by_question[root_number].append(item)
-            evidence_numbers_by_question[root_number].append(
-                evidence_number
-            )
+        evidence_by_question[root_number].append(item)
+        evidence_numbers_by_question[root_number].append(
+            evidence_number
+        )
 
     # Synthesize each original question independently.
     findings = []
@@ -922,27 +1138,63 @@ def synthesis_node(
     print("\nSynthesizing verified evidence into findings...")
 
     for question_number, question in roots:
+        question_evidence = evidence_by_question.get(
+            question_number,
+            [],
+        )
+        question_evidence_numbers = evidence_numbers_by_question.get(
+            question_number,
+            [],
+        )
+
+        assessment = assessments.get(question_number, {})
+        assessment_is_sufficient = bool(
+            assessment.get("covered", False)
+        )
+
+        # If sufficiency was established, use only the approved
+        # global evidence references for this original question.
+        # Otherwise, retain available evidence for partial findings.
+        if assessment_is_sufficient:
+            approved_numbers = set(
+                assessment.get("evidence_numbers", [])
+            )
+
+            approved_pairs = [
+                (number, item)
+                for number, item in zip(
+                    question_evidence_numbers,
+                    question_evidence,
+                )
+                if number in approved_numbers
+            ]
+
+            question_evidence = [
+                item
+                for _, item in approved_pairs
+            ]
+
+            question_evidence_numbers = [
+                number
+                for number, _ in approved_pairs
+            ]
+
         question_findings = _synthesize_original_question(
             question_number=question_number,
             question_text=question.question,
-            evidence_items=evidence_by_question.get(
-                question_number,
-                [],
-            ),
-            global_evidence_numbers=evidence_numbers_by_question.get(
-                question_number,
-                [],
-            ),
+            evidence_items=question_evidence,
+            global_evidence_numbers=question_evidence_numbers,
         )
 
         findings.extend(question_findings)
 
-    # Deduplicate finding text.
+    # Deduplicate identical wording only within the same
+    # original-question lineage.
     unique_findings = []
     seen_findings = set()
 
     for finding in findings:
-        key = finding.text.strip().casefold()
+        key = _finding_identity(finding)
 
         if key in seen_findings:
             continue
@@ -966,47 +1218,10 @@ def synthesis_node(
         assessments=assessments,
     )
 
-    # Generate report title and summary.
-    narrative_chain = (
-        report_narrative_prompt
-        | report_narrative_model
-    )
-
-    try:
-        narrative = narrative_chain.invoke(
-            {
-                "findings": _format_findings(findings),
-                "coverage": "\n".join(
-                    f"- Q{item.research_question_number}: "
-                    f"{item.status} — {item.explanation}"
-                    for item in coverage
-                ),
-                "gaps": _format_research_gaps(research_gaps),
-            }
-        )
-
-        title = narrative.title
-        summary = narrative.summary
-
-    except Exception as exc:
-        print(f"Report narrative generation failed: {exc}")
-
-        title = "Deep Research Report"
-
-        summary = (
-            f"The research produced {len(findings)} validated findings "
-            f"across {len(roots)} original questions. "
-            f"{sum(item.status == 'supported' for item in coverage)} "
-            "questions were fully supported, "
-            f"{sum(item.status == 'partially_supported' for item in coverage)} "
-            "were partially supported, and "
-            f"{sum(item.status == 'unresolved' for item in coverage)} "
-            "remain unresolved."
-        )
-
+    # Validate structural references before generating the narrative.
     report = ResearchReport(
-        title=title,
-        summary=summary,
+        title="Deep Research Report",
+        summary="Generating summary from validated report content.",
         findings=findings,
         coverage=coverage,
         research_gaps=research_gaps,
@@ -1019,6 +1234,57 @@ def synthesis_node(
         research_questions=questions,
         research_gaps=research_gaps,
         roots=roots,
+    )
+
+    # Generate narrative only from the validated report.
+    narrative_chain = (
+        report_narrative_prompt
+        | report_narrative_model
+    )
+
+    try:
+        narrative = narrative_chain.invoke(
+            {
+                "findings": _format_findings(report.findings),
+                "coverage": "\n".join(
+                    f"- Q{item.research_question_number}: "
+                    f"{item.status} — {item.explanation}"
+                    for item in report.coverage
+                ),
+                "gaps": _format_research_gaps(report.research_gaps),
+            }
+        )
+
+        title = narrative.title.strip() or "Deep Research Report"
+        summary = narrative.summary.strip()
+
+        if not summary:
+            raise ValueError("The generated summary is empty.")
+
+    except Exception as exc:
+        print(f"Report narrative generation failed: {exc}")
+
+        title = "Deep Research Report"
+
+        summary = (
+            f"The research produced {len(report.findings)} "
+            f"validated findings across {len(roots)} original questions. "
+            f"{sum(item.status == 'supported' for item in report.coverage)} "
+            "questions were fully supported, "
+            f"{sum(item.status == 'partially_supported' for item in report.coverage)} "
+            "were partially supported, and "
+            f"{sum(item.status == 'unresolved' for item in report.coverage)} "
+            "remain unresolved."
+        )
+
+    # Preserve validated findings, coverage, gaps, and trusted sources.
+    report = ResearchReport(
+        title=title,
+        summary=summary,
+        findings=report.findings,
+        coverage=report.coverage,
+        research_gaps=report.research_gaps,
+        sources=report.sources,
     )
 
     print("\n" + "=" * 80)

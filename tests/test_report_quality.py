@@ -152,7 +152,7 @@ def test_missing_question_references_are_derived(
         research_questions=research_questions,
     )
 
-    # Evidence E3 belongs to follow-up Q4, whose original parent is Q3.
+    # E3 belongs to follow-up Q4, whose original parent is Q3.
     assert validated.findings[0].research_question_numbers == [3]
 
 
@@ -196,10 +196,7 @@ def test_invalid_question_lineage_is_rejected(
         ],
     )
 
-    with pytest.raises(
-        ValueError,
-        match="does not belong",
-    ):
+    with pytest.raises(ValueError, match="does not belong"):
         _validate_report(
             report=report,
             evidence=evidence,
@@ -221,9 +218,7 @@ def test_unreferenced_model_source_urls_are_not_trusted(
                 evidence_numbers=[1],
             ),
         ],
-        sources=[
-            "https://fake.example/invented-source",
-        ],
+        sources=["https://fake.example/invented-source"],
     )
 
     validated = _validate_report(
@@ -239,6 +234,53 @@ def test_unreferenced_model_source_urls_are_not_trusted(
     assert "https://fake.example/invented-source" not in (
         validated.sources
     )
+
+
+def test_identical_findings_for_different_questions_are_preserved(
+    evidence,
+    research_questions,
+):
+    shared_text = (
+        "Retrieval methods rank or select relevant documents "
+        "to improve the context supplied to a language model."
+    )
+
+    report = ResearchReport(
+        title="Shared retrieval concept",
+        summary="The concept is relevant to two questions.",
+        findings=[
+            ResearchFinding(
+                text=shared_text,
+                research_question_numbers=[1],
+                evidence_numbers=[1],
+            ),
+            ResearchFinding(
+                text=shared_text,
+                research_question_numbers=[2],
+                evidence_numbers=[2],
+            ),
+        ],
+    )
+
+    validated = _validate_report(
+        report=report,
+        evidence=evidence,
+        research_questions=research_questions,
+    )
+
+    matching_findings = [
+        finding
+        for finding in validated.findings
+        if finding.text == shared_text
+    ]
+
+    assert len(matching_findings) == 2
+
+    assert matching_findings[0].research_question_numbers == [1]
+    assert matching_findings[0].evidence_numbers == [1]
+
+    assert matching_findings[1].research_question_numbers == [2]
+    assert matching_findings[1].evidence_numbers == [2]
 
 
 def test_all_original_questions_receive_coverage(
@@ -382,4 +424,32 @@ def test_original_question_cannot_have_a_parent():
             ),
             evidence=[],
             research_questions=invalid_questions,
+        )
+
+def test_followup_evidence_cannot_be_attributed_to_unrelated_question(
+    evidence,
+    research_questions,
+):
+    report = ResearchReport(
+        title="Test report",
+        summary="Test summary",
+        findings=[
+            ResearchFinding(
+                text=(
+                    "Hybrid retrieval combines lexical "
+                    "and dense retrieval signals."
+                ),
+                # E3 belongs to follow-up Q4, whose root is Q3.
+                # Attributing it to Q1 must be rejected.
+                research_question_numbers=[1],
+                evidence_numbers=[3],
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="does not belong"):
+        _validate_report(
+            report=report,
+            evidence=evidence,
+            research_questions=research_questions,
         )
