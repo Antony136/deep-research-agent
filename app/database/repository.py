@@ -1,5 +1,6 @@
 """
-Repository operations for persistent research sessions.
+Repository operations for persistent research sessions
+and observability events.
 """
 
 from typing import Any
@@ -9,6 +10,10 @@ from psycopg.types.json import Jsonb
 
 from app.database.connection import get_connection
 
+
+# ---------------------------------------------------------
+# RESEARCH SESSIONS
+# ---------------------------------------------------------
 
 def create_session(question: str) -> UUID:
     """Create a new research session and return its ID."""
@@ -210,6 +215,87 @@ def save_report(
                     f"Research session not found: {session_id}"
                 )
 
+
+# ---------------------------------------------------------
+# OBSERVABILITY EVENTS
+# ---------------------------------------------------------
+
+def save_observability_event(
+    event_type: str,
+    message: str,
+    session_id: UUID | str | None = None,
+    node_name: str | None = None,
+    log_level: str = "INFO",
+    duration_ms: float | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """
+    Persist one structured observability event.
+
+    Events can be associated with a research session or
+    stored without a session for application-level events.
+    """
+
+    if not event_type.strip():
+        raise ValueError("event_type cannot be empty.")
+
+    if not message.strip():
+        raise ValueError("message cannot be empty.")
+
+    allowed_log_levels = {
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "CRITICAL",
+    }
+
+    normalized_level = log_level.upper()
+
+    if normalized_level not in allowed_log_levels:
+        raise ValueError(
+            f"Invalid log level: {log_level}"
+        )
+
+    if duration_ms is not None and duration_ms < 0:
+        raise ValueError("duration_ms cannot be negative.")
+
+    normalized_session_id = (
+        UUID(str(session_id))
+        if session_id is not None
+        else None
+    )
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO observability_events (
+                    session_id,
+                    event_type,
+                    node_name,
+                    log_level,
+                    message,
+                    duration_ms,
+                    details
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    normalized_session_id,
+                    event_type.strip(),
+                    node_name,
+                    normalized_level,
+                    message.strip(),
+                    duration_ms,
+                    Jsonb(details or {}),
+                ),
+            )
+
+
+# ---------------------------------------------------------
+# SESSION RETRIEVAL
+# ---------------------------------------------------------
 
 def get_session(session_id: UUID) -> dict[str, Any] | None:
     """Retrieve a session and its stored state/report."""

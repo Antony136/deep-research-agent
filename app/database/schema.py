@@ -5,6 +5,10 @@ Database schema initialization for the Deep Research Agent.
 from app.database.connection import get_connection
 
 
+# ---------------------------------------------------------
+# RESEARCH SESSIONS
+# ---------------------------------------------------------
+
 CREATE_RESEARCH_SESSIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS research_sessions (
     id UUID PRIMARY KEY,
@@ -29,6 +33,10 @@ CREATE TABLE IF NOT EXISTS research_sessions (
 );
 """
 
+
+# ---------------------------------------------------------
+# RESEARCH QUESTIONS
+# ---------------------------------------------------------
 
 CREATE_RESEARCH_QUESTIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS research_questions (
@@ -59,6 +67,10 @@ CREATE TABLE IF NOT EXISTS research_questions (
 """
 
 
+# ---------------------------------------------------------
+# RESEARCH EVIDENCE
+# ---------------------------------------------------------
+
 CREATE_RESEARCH_EVIDENCE_TABLE = """
 CREATE TABLE IF NOT EXISTS research_evidence (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -78,6 +90,34 @@ CREATE TABLE IF NOT EXISTS research_evidence (
 """
 
 
+# ---------------------------------------------------------
+# OBSERVABILITY EVENTS
+# ---------------------------------------------------------
+
+CREATE_OBSERVABILITY_EVENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS observability_events (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    session_id UUID
+        REFERENCES research_sessions(id)
+        ON DELETE SET NULL,
+
+    event_type VARCHAR(100) NOT NULL,
+    node_name VARCHAR(150),
+    log_level VARCHAR(20) NOT NULL DEFAULT 'INFO',
+    message TEXT NOT NULL,
+    duration_ms DOUBLE PRECISION,
+    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+
+# ---------------------------------------------------------
+# INDEXES
+# ---------------------------------------------------------
+
 CREATE_INDEXES = [
     """
     CREATE INDEX IF NOT EXISTS idx_research_sessions_created_at
@@ -95,12 +135,25 @@ CREATE_INDEXES = [
     CREATE INDEX IF NOT EXISTS idx_research_evidence_session
     ON research_evidence (session_id, evidence_number);
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_observability_events_session_time
+    ON observability_events (session_id, created_at DESC);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_observability_events_type
+    ON observability_events (event_type, created_at DESC);
+    """,
 ]
 
 
+# ---------------------------------------------------------
+# INITIALIZE DATABASE
+# ---------------------------------------------------------
+
 def initialize_database() -> None:
     """
-    Create the research tables and indexes if they do not exist.
+    Create research tables, observability storage,
+    and indexes if they do not exist.
     """
 
     with get_connection() as connection:
@@ -108,6 +161,7 @@ def initialize_database() -> None:
             cursor.execute(CREATE_RESEARCH_SESSIONS_TABLE)
             cursor.execute(CREATE_RESEARCH_QUESTIONS_TABLE)
             cursor.execute(CREATE_RESEARCH_EVIDENCE_TABLE)
+            cursor.execute(CREATE_OBSERVABILITY_EVENTS_TABLE)
 
             for query in CREATE_INDEXES:
                 cursor.execute(query)

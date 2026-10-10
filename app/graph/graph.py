@@ -7,8 +7,9 @@ Human-in-the-loop checkpoints:
 3. Optional adaptive follow-up question approval.
 4. Optional final report approval.
 
-The existing research, verification, sufficiency, and synthesis
-workflow is preserved.
+Observability:
+- Records node execution start, completion, duration, and failures.
+- Preserves existing graph routing and HITL behavior.
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -33,6 +34,7 @@ from app.graph.nodes.research_sufficiency import (
 )
 from app.graph.nodes.synthesizer import synthesis_node
 from app.graph.state import ResearchState
+from app.observability.tracing import instrument_node
 
 
 # ============================================================
@@ -140,8 +142,6 @@ def should_review_adaptive_questions(
         print("\n[Router] No capacity for follow-up questions.")
         return "synthesis"
 
-    # Human review is optional. The adaptive review node
-    # remains the single place where proposals are accepted.
     if state.get("require_adaptive_research_approval", True):
         print("\n[Router] Follow-up questions need human review.")
         return "review"
@@ -233,8 +233,6 @@ def route_after_final_report_review(
 
     decision = state.get("final_report_review_decision")
 
-    # When final-report approval is disabled, the review node
-    # marks the report approved automatically.
     if state.get("final_report_approved", False):
         print("\n[Router] Final report approved.")
         return "end"
@@ -272,33 +270,96 @@ def build_research_graph(checkpointer=None):
     """
     Build and compile the complete research workflow.
 
+    Each executable node is wrapped with observability tracing.
+    Routing decisions remain unchanged.
+
     A checkpointer is required for resumable human-in-the-loop
-    interrupts.
+    interrupts across graph invocations.
     """
 
     graph = StateGraph(ResearchState)
 
-    # Register nodes.
-    graph.add_node("planner", planner_node)
-    graph.add_node("initial_plan_review", initial_plan_review_node)
+    # Register instrumented nodes.
+    graph.add_node(
+        "planner",
+        instrument_node("planner", planner_node),
+    )
+    graph.add_node(
+        "initial_plan_review",
+        instrument_node(
+            "initial_plan_review",
+            initial_plan_review_node,
+        ),
+    )
     graph.add_node(
         "initial_research_review",
-        initial_research_review_node,
+        instrument_node(
+            "initial_research_review",
+            initial_research_review_node,
+        ),
     )
-    graph.add_node("researcher", researcher_node)
-    graph.add_node("evidence_extractor", evidence_extractor_node)
-    graph.add_node("evidence_verifier", evidence_verifier_node)
-    graph.add_node("research_sufficiency", research_sufficiency_node)
-    graph.add_node("adaptive_planner", adaptive_planner_node)
-    graph.add_node("adaptive_review", adaptive_review_node)
+    graph.add_node(
+        "researcher",
+        instrument_node("researcher", researcher_node),
+    )
+    graph.add_node(
+        "evidence_extractor",
+        instrument_node(
+            "evidence_extractor",
+            evidence_extractor_node,
+        ),
+    )
+    graph.add_node(
+        "evidence_verifier",
+        instrument_node(
+            "evidence_verifier",
+            evidence_verifier_node,
+        ),
+    )
+    graph.add_node(
+        "research_sufficiency",
+        instrument_node(
+            "research_sufficiency",
+            research_sufficiency_node,
+        ),
+    )
+    graph.add_node(
+        "adaptive_planner",
+        instrument_node(
+            "adaptive_planner",
+            adaptive_planner_node,
+        ),
+    )
+    graph.add_node(
+        "adaptive_review",
+        instrument_node(
+            "adaptive_review",
+            adaptive_review_node,
+        ),
+    )
     graph.add_node(
         "auto_accept_adaptive",
-        auto_accept_adaptive_questions,
+        instrument_node(
+            "auto_accept_adaptive",
+            auto_accept_adaptive_questions,
+        ),
     )
-    graph.add_node("synthesizer", synthesis_node)
-    graph.add_node("final_report_review", final_report_review_node)
+    graph.add_node(
+        "synthesizer",
+        instrument_node("synthesizer", synthesis_node),
+    )
+    graph.add_node(
+        "final_report_review",
+        instrument_node(
+            "final_report_review",
+            final_report_review_node,
+        ),
+    )
 
-    # Initial plan and research authorization.
+    # --------------------------------------------------------
+    # Initial plan and research authorization
+    # --------------------------------------------------------
+
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "initial_plan_review")
 
@@ -321,7 +382,10 @@ def build_research_graph(checkpointer=None):
         },
     )
 
-    # Research and evidence processing.
+    # --------------------------------------------------------
+    # Research and evidence processing
+    # --------------------------------------------------------
+
     graph.add_edge("researcher", "evidence_extractor")
     graph.add_edge("evidence_extractor", "evidence_verifier")
     graph.add_edge("evidence_verifier", "research_sufficiency")
@@ -336,7 +400,10 @@ def build_research_graph(checkpointer=None):
         },
     )
 
-    # Adaptive planning and approval.
+    # --------------------------------------------------------
+    # Adaptive planning and approval
+    # --------------------------------------------------------
+
     graph.add_conditional_edges(
         "adaptive_planner",
         should_review_adaptive_questions,
@@ -365,7 +432,10 @@ def build_research_graph(checkpointer=None):
         },
     )
 
-    # Synthesis and optional final report approval.
+    # --------------------------------------------------------
+    # Synthesis and optional final report approval
+    # --------------------------------------------------------
+
     graph.add_edge("synthesizer", "final_report_review")
 
     graph.add_conditional_edges(
