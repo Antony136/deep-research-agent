@@ -3,8 +3,8 @@ Researcher node for the Deep Research Agent.
 
 The researcher takes one planned research question,
 searches the web, selects the strongest sources, reads
-those sources, and stores both the cumulative sources and
-the sources belonging to the current research question.
+those sources, and stores both cumulative sources and
+question-specific sources.
 """
 
 from app.graph.state import ResearchState
@@ -21,17 +21,13 @@ def researcher_node(
     state: ResearchState,
 ) -> ResearchState:
     """
-    Research the current question using web search,
-    source selection, and web page extraction.
-
-    The planner creates multiple research questions.
-    This node handles one question at a time.
+    Research one planned question at a time.
     """
 
     print("\n[Node] researcher")
 
-    questions = state["research_questions"]
-    current_index = state["current_question_index"]
+    questions = state.get("research_questions", [])
+    current_index = state.get("current_question_index", 0)
 
     if current_index >= len(questions):
         return {
@@ -41,73 +37,49 @@ def researcher_node(
             "active_research_question_number": None,
         }
 
-    # ------------------------------------------------------
-    # Identify the question being processed
-    # ------------------------------------------------------
-
     current_question = questions[current_index]
-
-    # Human-readable 1-based question number.
     current_question_number = current_index + 1
 
     print(
         f"Research question "
         f"{current_question_number}/{len(questions)}:"
     )
-
-    print(
-        f"  {current_question.question}"
-    )
+    print(f"  {current_question.question}")
 
     # ------------------------------------------------------
     # 1. Collect search candidates
     # ------------------------------------------------------
 
+    existing_sources = list(state.get("sources") or [])
+
     existing_urls = {
         source.url.rstrip("/").lower()
-        for source in state["sources"]
+        for source in existing_sources
     }
 
     candidate_sources = []
 
     for query in current_question.search_queries:
-
-        print(
-            f"\n  Searching: {query}"
-        )
+        print(f"\n  Searching: {query}")
 
         results = search_web(
             query=query,
             max_results=5,
         )
 
-        print(
-            f"  Found {len(results)} search results."
-        )
+        print(f"  Found {len(results)} search results.")
 
         for result in results:
-
             if not result.url:
                 continue
 
-            normalized_url = (
-                result.url
-                .rstrip("/")
-                .lower()
-            )
+            normalized_url = result.url.rstrip("/").lower()
 
             if normalized_url in existing_urls:
-
-                print(
-                    f"    Skipping duplicate: "
-                    f"{result.url}"
-                )
-
+                print(f"    Skipping duplicate: {result.url}")
                 continue
 
-            existing_urls.add(
-                normalized_url
-            )
+            existing_urls.add(normalized_url)
 
             candidate_sources.append(
                 Source(
@@ -131,74 +103,42 @@ def researcher_node(
         max_sources=MAX_SOURCES_PER_QUESTION,
     )
 
-    print(
-        f"  Sources selected: "
-        f"{len(selected_sources)}"
-    )
+    print(f"  Sources selected: {len(selected_sources)}")
 
     # ------------------------------------------------------
-    # 3. Read only selected sources
+    # 3. Read selected sources
     # ------------------------------------------------------
 
     discovered_sources = []
 
     for source in selected_sources:
+        print(f"\n    Reading: {source.title or source.url}")
 
-        print(
-            f"\n    Reading: "
-            f"{source.title or source.url}"
-        )
-
-        page = read_webpage(
-            source.url
-        )
+        page = read_webpage(source.url)
 
         if page is not None:
-
             source = Source(
                 url=page.url,
-                title=(
-                    page.title
-                    or source.title
-                ),
+                title=page.title or source.title,
                 content=page.content,
             )
-
-            print(
-                "    Page read successfully."
-            )
-
+            print("    Page read successfully.")
         else:
-
             print(
-                "    Page could not be read."
-                " Keeping search snippet."
+                "    Page could not be read. "
+                "Keeping search snippet."
             )
 
-        discovered_sources.append(
-            source
-        )
+        discovered_sources.append(source)
 
     # ------------------------------------------------------
-    # 4. Store sources
+    # 4. Combine cumulative sources
     # ------------------------------------------------------
 
-    existing_sources = state["sources"]
+    combined_sources = existing_sources + discovered_sources
 
-    combined_sources = (
-        existing_sources
-        + discovered_sources
-    )
-
-    print(
-        f"\n  New selected sources: "
-        f"{len(discovered_sources)}"
-    )
-
-    print(
-        f"  Total sources in state: "
-        f"{len(combined_sources)}"
-    )
+    print(f"\n  New selected sources: {len(discovered_sources)}")
+    print(f"  Total sources in state: {len(combined_sources)}")
 
     # ------------------------------------------------------
     # 5. Update state
@@ -206,26 +146,9 @@ def researcher_node(
 
     return {
         **state,
-
         "sources": combined_sources,
-
-        # These are ONLY the sources belonging to the
-        # research question currently being processed.
         "current_sources": discovered_sources,
-
-        # Explicitly preserve the question whose sources
-        # are currently being processed.
         "active_research_question": current_question,
-
-        # Evidence extracted from these sources will carry
-        # this same 1-based question number.
-        "active_research_question_number": (
-            current_question_number
-        ),
-
-        # Advance the pointer so the next researcher call
-        # processes the next question.
-        "current_question_index": (
-            current_index + 1
-        ),
+        "active_research_question_number": current_question_number,
+        "current_question_index": current_index + 1,
     }

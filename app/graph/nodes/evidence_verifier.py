@@ -21,20 +21,28 @@ def evidence_verifier_node(
 
     print("\n[Node] evidence_verifier")
 
-    pending_evidence = state["pending_evidence"]
-    current_sources = state["current_sources"]
+    # Read state safely to avoid KeyError when optional
+    # fields have not been initialized.
+    pending_evidence = state.get("pending_evidence", [])
+    current_sources = state.get("current_sources", [])
+    existing_evidence = state.get("evidence", [])
+    research_questions = state.get("research_questions", [])
+    current_question_index = state.get(
+        "current_question_index",
+        0,
+    )
 
     if not pending_evidence:
         print("  No pending evidence to verify.")
 
         research_complete = (
-            state["current_question_index"]
-            >= len(state["research_questions"])
+            current_question_index >= len(research_questions)
         )
 
         return {
             **state,
             "pending_evidence": [],
+            "evidence": existing_evidence,
             "research_complete": research_complete,
         }
 
@@ -43,8 +51,8 @@ def evidence_verifier_node(
         f"{len(pending_evidence)}"
     )
 
-    current_question_number = (
-        state["active_research_question_number"]
+    current_question_number = state.get(
+        "active_research_question_number"
     )
 
     if current_question_number is not None:
@@ -60,44 +68,22 @@ def evidence_verifier_node(
         )
     )
 
-    print(
-        f"  Valid evidence: "
-        f"{len(valid_evidence)}"
-    )
-
-    print(
-        f"  Rejected evidence: "
-        f"{len(rejected_evidence)}"
-    )
+    print(f"  Valid evidence: {len(valid_evidence)}")
+    print(f"  Rejected evidence: {len(rejected_evidence)}")
 
     for evidence, reason in rejected_evidence:
-
-        print()
-        print("  REJECTED EVIDENCE")
-
+        print("\n  REJECTED EVIDENCE")
         print(
             f"    Research question: "
             f"{evidence.research_question_number}"
         )
+        print(f"    Claim: {evidence.claim}")
+        print(f"    Reason: {reason}")
 
-        print(
-            f"    Claim: {evidence.claim}"
-        )
-
-        print(
-            f"    Reason: {reason}"
-        )
-
-    existing_evidence = state["evidence"]
-
-    combined_evidence = (
-        existing_evidence
-        + valid_evidence
-    )
+    combined_evidence = existing_evidence + valid_evidence
 
     research_complete = (
-        state["current_question_index"]
-        >= len(state["research_questions"])
+        current_question_index >= len(research_questions)
     )
 
     if research_complete:

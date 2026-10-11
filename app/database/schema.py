@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS research_sessions (
             status IN (
                 'created',
                 'running',
+                'waiting_for_review',
                 'completed',
                 'failed'
             )
@@ -152,13 +153,41 @@ CREATE_INDEXES = [
 
 def initialize_database() -> None:
     """
-    Create research tables, observability storage,
-    and indexes if they do not exist.
+    Create research tables, observability storage, and indexes.
+
+    Also migrate the existing session-status constraint so
+    paused human-review sessions can be stored.
     """
 
     with get_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(CREATE_RESEARCH_SESSIONS_TABLE)
+
+            # Update the constraint on existing databases.
+            cursor.execute(
+                """
+                ALTER TABLE research_sessions
+                DROP CONSTRAINT IF EXISTS
+                    research_sessions_status_check;
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE research_sessions
+                ADD CONSTRAINT research_sessions_status_check
+                CHECK (
+                    status IN (
+                        'created',
+                        'running',
+                        'waiting_for_review',
+                        'completed',
+                        'failed'
+                    )
+                );
+                """
+            )
+
             cursor.execute(CREATE_RESEARCH_QUESTIONS_TABLE)
             cursor.execute(CREATE_RESEARCH_EVIDENCE_TABLE)
             cursor.execute(CREATE_OBSERVABILITY_EVENTS_TABLE)

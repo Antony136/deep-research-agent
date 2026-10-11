@@ -52,6 +52,7 @@ def update_session_status(
     allowed_statuses = {
         "created",
         "running",
+        "waiting_for_review",
         "completed",
         "failed",
     }
@@ -348,7 +349,12 @@ def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id, question, status, created_at, updated_at
+                SELECT
+                    id,
+                    question,
+                    status,
+                    created_at,
+                    updated_at
                 FROM research_sessions
                 ORDER BY updated_at DESC
                 LIMIT %s
