@@ -213,6 +213,14 @@ def test_complete_research_workflow_without_external_services(
 
     initial_state = {
         "question": "How does vector search support RAG?",
+        "require_initial_plan_approval": False,
+        "require_initial_research_approval": False,
+        "require_adaptive_research_approval": False,
+        "require_final_report_approval": False,
+        "initial_plan_approved": True,
+        "initial_research_approved": True,
+        "research_authorized": True,
+        "final_report_approved": True,
         "research_questions": [],
         "active_question": None,
         "active_question_number": 0,

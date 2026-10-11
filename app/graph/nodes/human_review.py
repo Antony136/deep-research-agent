@@ -21,10 +21,10 @@ def initial_plan_review_node(
 
     payload = {
         "kind": "initial_plan",
-        "question": state["question"],
+        "question": state.get("question", ""),
         "research_questions": [
             question.model_dump(mode="json")
-            for question in state["research_questions"]
+            for question in state.get("research_questions", [])
         ],
         "message": (
             "Review the initial research plan before "
@@ -46,7 +46,7 @@ def initial_plan_review_node(
 
     if action == "revise":
         revisions = decision.get("revisions", {})
-        updated_questions = list(state["research_questions"])
+        updated_questions = list(state.get("research_questions", []))
 
         for question_number, revision in revisions.items():
             try:
@@ -122,10 +122,10 @@ def initial_research_approval_node(
     decision = interrupt(
         {
             "kind": "initial_research",
-            "question": state["question"],
+            "question": state.get("question", ""),
             "research_questions": [
                 question.model_dump(mode="json")
-                for question in state["research_questions"]
+                for question in state.get("research_questions", [])
             ],
             "message": (
                 "Approve web research for the entire initial "
@@ -173,8 +173,8 @@ def adaptive_research_review_node(
 
     print("\n[Node] adaptive_research_review")
 
-    start_index = state["current_question_index"]
-    questions = state["research_questions"]
+    start_index = state.get("current_question_index", 0)
+    questions = state.get("research_questions", [])
     proposed_questions = questions[start_index:]
 
     # No proposed questions means no approval is necessary.
@@ -184,7 +184,7 @@ def adaptive_research_review_node(
 
     payload = {
         "kind": "adaptive_research",
-        "question": state["question"],
+        "question": state.get("question", ""),
         "research_gaps": state.get("research_gaps", []),
         "proposed_questions": [
             {

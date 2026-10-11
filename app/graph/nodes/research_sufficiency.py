@@ -578,8 +578,8 @@ def research_sufficiency_node(
 
     print("\n[Node] research_sufficiency")
 
-    research_questions = state["research_questions"]
-    evidence = state["evidence"]
+    research_questions = state.get("research_questions", [])
+    evidence = state.get("evidence", [])
 
     print(f"  Planned research questions: {len(research_questions)}")
     print(f"  Verified evidence available: {len(evidence)}")

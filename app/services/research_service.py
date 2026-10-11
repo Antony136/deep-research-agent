@@ -488,6 +488,32 @@ def execute_research(
                         "Initial research state is required."
                     )
 
+                # Ensure all default state keys are present even if caller
+                # provided a partial dictionary.
+                base_state = build_initial_state(
+                    question=initial_state.get("question", ""),
+                    require_initial_plan_approval=initial_state.get(
+                        "require_initial_plan_approval", True
+                    ),
+                    require_initial_research_approval=initial_state.get(
+                        "require_initial_research_approval", True
+                    ),
+                    require_adaptive_research_approval=initial_state.get(
+                        "require_adaptive_research_approval", True
+                    ),
+                    require_final_report_approval=initial_state.get(
+                        "require_final_report_approval", True
+                    ),
+                    max_research_rounds=initial_state.get(
+                        "max_research_rounds", 3
+                    ),
+                    max_total_research_questions=initial_state.get(
+                        "max_total_research_questions", 10
+                    ),
+                )
+                base_state.update(initial_state)
+                initial_state = base_state
+
                 result = graph.invoke(
                     initial_state,
                     config=config,

@@ -120,7 +120,7 @@ def initial_research_review_node(
                 "approve",
                 "reject",
             ],
-            "research_question": state["question"],
+            "research_question": state.get("question", ""),
             "research_plan": research_plan,
         }
     )

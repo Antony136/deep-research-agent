@@ -374,3 +374,88 @@ def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def get_observability_events(
+    session_id: UUID | str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Retrieve recorded observability events."""
+
+    if not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500.")
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            if session_id is not None:
+                cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        session_id,
+                        event_type,
+                        node_name,
+                        log_level,
+                        message,
+                        duration_ms,
+                        details,
+                        created_at
+                    FROM observability_events
+                    WHERE session_id = %s
+                    ORDER BY created_at ASC
+                    LIMIT %s
+                    """,
+                    (UUID(str(session_id)), limit),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        session_id,
+                        event_type,
+                        node_name,
+                        log_level,
+                        message,
+                        duration_ms,
+                        details,
+                        created_at
+                    FROM observability_events
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+
+            rows = cursor.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "session_id": str(row[1]) if row[1] else None,
+            "event_type": row[2],
+            "node_name": row[3],
+            "log_level": row[4],
+            "message": row[5],
+            "duration_ms": row[6],
+            "details": row[7] or {},
+            "created_at": row[8],
+        }
+        for row in rows
+    ]
+
+
+def delete_session(session_id: UUID) -> bool:
+    """Delete a research session and its associated records."""
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM research_sessions WHERE id = %s",
+                (session_id,),
+            )
+            deleted = cursor.rowcount > 0
+        connection.commit()
+
+    return deleted
+

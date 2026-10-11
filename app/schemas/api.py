@@ -183,6 +183,37 @@ class HealthResponse(BaseModel):
 
 
 # ---------------------------------------------------------
+# OBSERVABILITY SCHEMAS
+# ---------------------------------------------------------
+
+class ObservabilityEventResponse(BaseModel):
+    """Structured observability event representation."""
+
+    id: int
+    session_id: str | None = None
+    event_type: str
+    node_name: str | None = None
+    log_level: str
+    message: str
+    duration_ms: float | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ObservabilityEventsListResponse(BaseModel):
+    """List of observability events."""
+
+    events: list[ObservabilityEventResponse]
+
+
+class SessionDeletedResponse(BaseModel):
+    """Response returned when a session is deleted."""
+
+    deleted: bool
+    session_id: str
+
+
+# ---------------------------------------------------------
 # SHARED MODEL CONFIGURATION
 # ---------------------------------------------------------
 
@@ -192,3 +223,4 @@ class APIModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
+

@@ -103,7 +103,7 @@ def planner_node(
 
     response = chain.invoke(
         {
-            "question": state["question"],
+            "question": state.get("question", ""),
         }
     )
 

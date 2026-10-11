@@ -1,4 +1,3 @@
-```text
 # Python
 __pycache__/
 *.py[cod]
@@ -39,4 +38,6 @@ data/research/*
 # Generated files
 *.tmp
 *.bak
-```
+
+dist/
+node_modules/

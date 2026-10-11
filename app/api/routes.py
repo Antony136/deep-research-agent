@@ -13,6 +13,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from app.schemas.api import (
     HealthResponse,
+    ObservabilityEventResponse,
+    ObservabilityEventsListResponse,
     PendingReviewResponse,
     ResearchCreatedResponse,
     ResearchRequest,
@@ -21,6 +23,7 @@ from app.schemas.api import (
     ResearchSessionSummary,
     ReviewDecisionRequest,
     ReviewSubmissionResponse,
+    SessionDeletedResponse,
 )
 from app.services.research_service import (
     get_pending_review,
@@ -87,27 +90,20 @@ def create_research(
 
         session_id = create_session(question)
 
-        initial_state = {
-            "question": question,
-            "require_initial_plan_approval": (
-                request.require_initial_plan_approval
-            ),
-            "require_initial_research_approval": (
-                request.require_initial_research_approval
-            ),
-            "require_adaptive_research_approval": (
-                request.require_adaptive_research_approval
-            ),
-            "require_final_report_approval": (
-                request.require_final_report_approval
-            ),
-            "max_research_rounds": request.max_research_rounds,
-            "max_total_research_questions": (
-                request.max_total_research_questions
-            ),
-        }
+        from app.services.research_service import (
+            build_initial_state,
+            execute_research,
+        )
 
-        from app.services.research_service import execute_research
+        initial_state = build_initial_state(
+            question=question,
+            require_initial_plan_approval=request.require_initial_plan_approval,
+            require_initial_research_approval=request.require_initial_research_approval,
+            require_adaptive_research_approval=request.require_adaptive_research_approval,
+            require_final_report_approval=request.require_final_report_approval,
+            max_research_rounds=request.max_research_rounds,
+            max_total_research_questions=request.max_total_research_questions,
+        )
 
         executor.submit(
             execute_research,
@@ -341,3 +337,209 @@ def submit_review_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not submit the review.",
         ) from exc
+
+
+# ---------------------------------------------------------
+# RETRY A FAILED OR INTERRUPTED SESSION
+# ---------------------------------------------------------
+
+@router.post(
+    "/research/{session_id}/retry",
+    response_model=ReviewSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_research(
+    session_id: UUID,
+) -> ReviewSubmissionResponse:
+    """Retry a failed or stalled research session."""
+
+    try:
+        session = get_research_session(session_id)
+
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Research session not found.",
+            )
+
+        from app.database.repository import update_session_status
+        from app.services.research_service import (
+            build_initial_state,
+            execute_research,
+        )
+
+        update_session_status(session_id, "running")
+
+        initial_state = build_initial_state(
+            question=session["question"],
+        )
+
+        executor.submit(
+            execute_research,
+            session_id,
+            initial_state,
+            None,
+        )
+
+        return ReviewSubmissionResponse(
+            session_id=str(session_id),
+            status="running",
+            message="Research retry scheduled.",
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to retry research session %s.",
+            session_id,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not retry the research session.",
+        ) from exc
+
+
+# ---------------------------------------------------------
+# DELETE RESEARCH SESSION
+# ---------------------------------------------------------
+
+@router.delete(
+    "/research/{session_id}",
+    response_model=SessionDeletedResponse,
+)
+def delete_research_session_endpoint(
+    session_id: UUID,
+) -> SessionDeletedResponse:
+    """Delete a research session and all associated data."""
+
+    try:
+        session = get_research_session(session_id)
+
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Research session not found.",
+            )
+
+        from app.database.repository import delete_session
+
+        deleted = delete_session(session_id)
+
+        return SessionDeletedResponse(
+            deleted=deleted,
+            session_id=str(session_id),
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to delete research session %s.",
+            session_id,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not delete the research session.",
+        ) from exc
+
+
+# ---------------------------------------------------------
+# SESSION OBSERVABILITY EVENTS
+# ---------------------------------------------------------
+
+@router.get(
+    "/research/{session_id}/events",
+    response_model=ObservabilityEventsListResponse,
+)
+def get_session_events_endpoint(
+    session_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> ObservabilityEventsListResponse:
+    """Retrieve observability events recorded for this session."""
+
+    try:
+        from app.database.repository import get_observability_events
+
+        events = get_observability_events(session_id=session_id, limit=limit)
+
+        return ObservabilityEventsListResponse(
+            events=[
+                ObservabilityEventResponse(**event)
+                for event in events
+            ]
+        )
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to retrieve events for session %s.",
+            session_id,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not retrieve session observability events.",
+        ) from exc
+
+
+# ---------------------------------------------------------
+# GLOBAL OBSERVABILITY EVENTS
+# ---------------------------------------------------------
+
+@router.get(
+    "/observability/events",
+    response_model=ObservabilityEventsListResponse,
+)
+def get_global_events_endpoint(
+    limit: int = Query(default=50, ge=1, le=500),
+) -> ObservabilityEventsListResponse:
+    """Retrieve recent observability events across all sessions."""
+
+    try:
+        from app.database.repository import get_observability_events
+
+        events = get_observability_events(session_id=None, limit=limit)
+
+        return ObservabilityEventsListResponse(
+            events=[
+                ObservabilityEventResponse(**event)
+                for event in events
+            ]
+        )
+
+    except Exception as exc:
+        logger.exception("Failed to retrieve global observability events.")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not retrieve observability events.",
+        ) from exc
+
+
+# ---------------------------------------------------------
+# RUN METRICS
+# ---------------------------------------------------------
+
+@router.get(
+    "/observability/metrics",
+)
+def get_metrics_endpoint():
+    """Retrieve node execution metrics snapshot."""
+
+    try:
+        from app.observability.tracing import get_run_metrics
+
+        return get_run_metrics()
+
+    except Exception as exc:
+        logger.exception("Failed to retrieve run metrics.")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not retrieve run metrics.",
+        ) from exc
+

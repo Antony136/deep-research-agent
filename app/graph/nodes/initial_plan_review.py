@@ -90,7 +90,7 @@ def initial_plan_review_node(
                 "revise",
                 "reject",
             ],
-            "research_question": state["question"],
+            "research_question": state.get("question", ""),
             "proposed_questions": proposed_plan,
         }
     )

@@ -87,9 +87,9 @@ def should_continue_research(
 ) -> str:
     """Decide whether to research, adapt the plan, or synthesize."""
 
-    current_index = state["current_question_index"]
-    total_questions = len(state["research_questions"])
-    max_total_questions = state["max_total_research_questions"]
+    current_index = state.get("current_question_index", 0)
+    total_questions = len(state.get("research_questions", []))
+    max_total_questions = state.get("max_total_research_questions", 10)
 
     if current_index < total_questions:
         print("\n[Router] Planned research questions remain.")
@@ -98,7 +98,7 @@ def should_continue_research(
         )
         return "research"
 
-    if state["research_sufficient"]:
+    if state.get("research_sufficient", False):
         print("\n[Router] Research is sufficient.")
         return "synthesis"
 
@@ -106,7 +106,7 @@ def should_continue_research(
         print("\n[Router] Maximum question budget reached.")
         return "synthesis"
 
-    if state["research_round"] < state["max_research_rounds"]:
+    if state.get("research_round", 0) < state.get("max_research_rounds", 3):
         print("\n[Router] Research remains insufficient.")
         print("[Router] Starting adaptive planning.")
         return "adaptive_planner"
@@ -129,8 +129,8 @@ def should_review_adaptive_questions(
         [],
     )
 
-    current_questions = state["research_questions"]
-    max_total_questions = state["max_total_research_questions"]
+    current_questions = state.get("research_questions", [])
+    max_total_questions = state.get("max_total_research_questions", 10)
 
     if not proposed_questions:
         print("\n[Router] No usable follow-up questions proposed.")
@@ -158,13 +158,13 @@ def auto_accept_adaptive_questions(
     is disabled, while enforcing the question budget.
     """
 
-    current_questions = list(state["research_questions"])
+    current_questions = list(state.get("research_questions", []))
     proposed_questions = state.get(
         "proposed_research_questions",
         [],
     )
 
-    max_total_questions = state["max_total_research_questions"]
+    max_total_questions = state.get("max_total_research_questions", 10)
     capacity = max(0, max_total_questions - len(current_questions))
     accepted_questions = proposed_questions[:capacity]
 
@@ -202,9 +202,9 @@ def should_continue_after_adaptive_review(
         print("\n[Router] Follow-up questions were not approved.")
         return "synthesis"
 
-    current_index = state["current_question_index"]
-    total_questions = len(state["research_questions"])
-    max_total_questions = state["max_total_research_questions"]
+    current_index = state.get("current_question_index", 0)
+    total_questions = len(state.get("research_questions", []))
+    max_total_questions = state.get("max_total_research_questions", 10)
 
     if current_index >= total_questions:
         print("\n[Router] No approved follow-up questions remain.")
@@ -245,10 +245,10 @@ def route_after_final_report_review(
         print("\n[Router] Final-report review did not request more research.")
         return "end"
 
-    total_questions = len(state["research_questions"])
-    max_total_questions = state["max_total_research_questions"]
-    research_round = state["research_round"]
-    max_research_rounds = state["max_research_rounds"]
+    total_questions = len(state.get("research_questions", []))
+    max_total_questions = state.get("max_total_research_questions", 10)
+    research_round = state.get("research_round", 0)
+    max_research_rounds = state.get("max_research_rounds", 3)
 
     if (
         total_questions < max_total_questions

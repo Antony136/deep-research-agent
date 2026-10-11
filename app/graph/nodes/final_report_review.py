@@ -84,7 +84,7 @@ def final_report_review_node(
                 "approve",
                 "research_more",
             ],
-            "research_question": state["question"],
+            "research_question": state.get("question", ""),
             "research_round": state.get("research_round", 0),
             "verified_evidence_count": len(
                 state.get("evidence", [])
