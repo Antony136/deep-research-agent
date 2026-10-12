@@ -1,0 +1,30 @@
+import {
+  BookOpen,
+  Brain,
+  CheckCircle2,
+  Circle,
+  FileCheck,
+  FileSearch,
+  GitMerge,
+  Scale,
+  Search,
+  ShieldCheck,
+  Sparkles,
+} from 'lucide-react';
+
+export const WORKFLOW_NODES = [
+  { id: '__start__', label: 'Start', x: 110, y: 170, icon: Circle, description: 'Entry point that begins a new research session.' },
+  { id: 'planner', label: 'Planner', x: 380, y: 170, icon: Brain, description: 'Turns the research request into focused questions and search queries.' },
+  { id: 'initial_plan_review', label: 'Initial Plan Review', x: 650, y: 170, icon: ShieldCheck, hitl: true, description: 'Allows the user to approve, revise, or reject the proposed research plan.' },
+  { id: 'initial_research_review', label: 'Research Approval', x: 920, y: 170, icon: ShieldCheck, hitl: true, description: 'Waits for authorization before starting web research.' },
+  { id: 'researcher', label: 'Researcher', x: 1190, y: 170, icon: Search, description: 'Searches the web and collects useful source material for each question.' },
+  { id: 'evidence_extractor', label: 'Evidence Extractor', x: 1460, y: 170, icon: FileSearch, description: 'Extracts factual claims and supporting passages from the selected sources.' },
+  { id: 'evidence_verifier', label: 'Evidence Verifier', x: 1730, y: 170, icon: FileCheck, description: 'Checks extracted claims against their supporting source text.' },
+  { id: 'research_sufficiency', label: 'Research Sufficiency', x: 2000, y: 170, icon: Scale, description: 'Determines whether the evidence is sufficient or more research is needed.' },
+  { id: 'adaptive_planner', label: 'Adaptive Planner', x: 2000, y: 440, icon: GitMerge, description: 'Creates follow-up questions to address gaps in the collected evidence.' },
+  { id: 'adaptive_review', label: 'Adaptive Review', x: 1730, y: 680, icon: ShieldCheck, hitl: true, description: 'Requests approval for additional research when human review is enabled.' },
+  { id: 'auto_accept_adaptive', label: 'Automatic Approval', x: 2000, y: 680, icon: CheckCircle2, description: 'Accepts valid follow-up questions automatically when manual approval is disabled.' },
+  { id: 'synthesizer', label: 'Report Synthesizer', x: 2000, y: 440, icon: Sparkles, description: 'Combines verified evidence into a structured research report.' },
+  { id: 'final_report_review', label: 'Final Report Review', x: 2000, y: 170, icon: BookOpen, hitl: true, description: 'Allows the user to approve the final report or request more research.' },
+  { id: '__end__', label: 'End', x: 2000, y: 930, icon: Circle, description: 'Terminal point reached when the research workflow finishes.' },
+];

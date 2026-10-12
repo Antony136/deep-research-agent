@@ -268,3 +268,24 @@ def test_complete_research_workflow_without_external_services(
     assert final_report.coverage[0].status == "supported"
     assert final_report.sources[0] == source.url
     assert final_state["research_gaps"] == []
+
+    streamed_updates = list(
+        graph.stream(
+            initial_state,
+            stream_mode="updates",
+        )
+    )
+    streamed_nodes = {
+        node_name
+        for update in streamed_updates
+        for node_name in update
+    }
+
+    assert {
+        "planner",
+        "researcher",
+        "evidence_extractor",
+        "evidence_verifier",
+        "research_sufficiency",
+        "synthesizer",
+    }.issubset(streamed_nodes)

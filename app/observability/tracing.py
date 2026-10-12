@@ -158,6 +158,7 @@ class PostgreSQLEventHandler(logging.Handler):
         "node_started",
         "node_completed",
         "node_failed",
+        "node_interrupted",
     }
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -207,26 +208,9 @@ class PostgreSQLEventHandler(logging.Handler):
             )
 
         except Exception:
-            # Never recursively log through the same handler.
-            try:
-                fallback = logging.StreamHandler()
-                fallback.setFormatter(ConsoleFormatter())
-                fallback.emit(
-                    logging.LogRecord(
-                        name="observability.persistence",
-                        level=logging.ERROR,
-                        pathname=__file__,
-                        lineno=0,
-                        msg=(
-                            "Failed to persist observability event "
-                            f"{event_type!r}"
-                        ),
-                        args=(),
-                        exc_info=None,
-                    )
-                )
-            except Exception:
-                pass
+            # Use logging's built-in fallback to stderr rather than
+            # recursively passing this persistence failure to handlers.
+            self.handleError(record)
 
 
 # ============================================================

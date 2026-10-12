@@ -402,7 +402,7 @@ def get_observability_events(
                         created_at
                     FROM observability_events
                     WHERE session_id = %s
-                    ORDER BY created_at ASC
+                    ORDER BY created_at DESC, id DESC
                     LIMIT %s
                     """,
                     (UUID(str(session_id)), limit),
@@ -429,7 +429,7 @@ def get_observability_events(
 
             rows = cursor.fetchall()
 
-    return [
+    events = [
         {
             "id": row[0],
             "session_id": str(row[1]) if row[1] else None,
@@ -443,6 +443,11 @@ def get_observability_events(
         }
         for row in rows
     ]
+
+    if session_id is not None:
+        events.reverse()
+
+    return events
 
 
 def delete_session(session_id: UUID) -> bool:
@@ -458,4 +463,3 @@ def delete_session(session_id: UUID) -> bool:
         connection.commit()
 
     return deleted
-

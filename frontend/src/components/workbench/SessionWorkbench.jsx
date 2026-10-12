@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ArrowLeft,
   RefreshCw,
@@ -37,6 +37,8 @@ export function SessionWorkbench({
   const [session, setSession] = useState(null);
   const [pendingReview, setPendingReview] = useState(null);
   const [events, setEvents] = useState([]);
+  const [eventsError, setEventsError] = useState(null);
+  const eventsErrorNotified = useRef(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -66,8 +68,14 @@ export function SessionWorkbench({
       try {
         const eventsData = await api.getSessionEvents(sessionId);
         setEvents(eventsData.events || []);
-      } catch {
-        // Fallback silently if events table is empty
+        setEventsError(null);
+        eventsErrorNotified.current = false;
+      } catch (err) {
+        setEventsError(err.message || 'Could not retrieve node events.');
+        if (!eventsErrorNotified.current) {
+          toast.error(err.message || 'Could not retrieve node events.');
+          eventsErrorNotified.current = true;
+        }
       }
     } catch (err) {
       if (!isPolling) {
@@ -86,11 +94,11 @@ export function SessionWorkbench({
   // Polling loop when running or waiting for review
   useEffect(() => {
     if (!autoRefresh) return;
-    if (session?.status !== 'running' && session?.status !== 'waiting_for_review') return;
+    if (!['created', 'running', 'waiting_for_review'].includes(session?.status)) return;
 
     const interval = setInterval(() => {
       loadSessionData(true);
-    }, 3000);
+    }, 2000);
 
     return () => clearInterval(interval);
   }, [autoRefresh, session?.status, loadSessionData]);
@@ -179,7 +187,7 @@ export function SessionWorkbench({
 
         <div className="flex items-center gap-2 self-end sm:self-auto">
           {/* Auto-refresh toggle */}
-          {(session.status === 'running' || session.status === 'waiting_for_review') && (
+          {(['created', 'running', 'waiting_for_review'].includes(session.status)) && (
             <button
               type="button"
               onClick={() => setAutoRefresh(!autoRefresh)}
@@ -295,6 +303,7 @@ export function SessionWorkbench({
       <WorkflowGraph
         session={session}
         pendingReview={pendingReview}
+        events={events}
       />
 
       {/* Workbench Tabbed Section */}
@@ -365,6 +374,7 @@ export function SessionWorkbench({
           {activeTab === 'events' && (
             <SessionEventsLog
               events={events}
+              error={eventsError}
               loading={refreshing}
               onRefresh={() => loadSessionData(false)}
             />

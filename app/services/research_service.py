@@ -320,6 +320,32 @@ def get_latest_graph_state(
     return {}
 
 
+def stream_graph_updates(
+    graph: Any,
+    graph_input: Any,
+    config: dict[str, Any],
+    session_id: UUID,
+) -> dict[str, Any]:
+    """Persist each completed node update while the graph is running."""
+
+    state = get_latest_graph_state(graph, config)
+    if not state and isinstance(graph_input, dict):
+        state = dict(graph_input)
+
+    for update_chunk in graph.stream(
+        graph_input,
+        config=config,
+        stream_mode="updates",
+    ):
+        for node_update in update_chunk.values():
+            if isinstance(node_update, dict):
+                state.update(node_update)
+        if state:
+            persist_session_state(session_id, state)
+
+    return get_latest_graph_state(graph, config, fallback=state)
+
+
 # ---------------------------------------------------------
 # REVIEW VALIDATION
 # ---------------------------------------------------------
@@ -477,9 +503,11 @@ def execute_research(
                     resume_decision,
                 )
 
-                result = graph.invoke(
+                result = stream_graph_updates(
+                    graph,
                     Command(resume=decision),
-                    config=config,
+                    config,
+                    session_id,
                 )
 
             else:
@@ -514,9 +542,11 @@ def execute_research(
                 base_state.update(initial_state)
                 initial_state = base_state
 
-                result = graph.invoke(
+                result = stream_graph_updates(
+                    graph,
                     initial_state,
-                    config=config,
+                    config,
+                    session_id,
                 )
 
             while True:
@@ -563,9 +593,11 @@ def execute_research(
                 if snapshot.next:
                     # A graph can have more work scheduled without
                     # an interrupt. Continue from its checkpoint.
-                    result = graph.invoke(
+                    result = stream_graph_updates(
+                        graph,
                         None,
-                        config=config,
+                        config,
+                        session_id,
                     )
                     continue
 

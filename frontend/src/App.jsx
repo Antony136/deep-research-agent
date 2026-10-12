@@ -7,6 +7,8 @@ import { SessionsList } from './components/sessions/SessionsList';
 import { CreateSessionModal } from './components/sessions/CreateSessionModal';
 import { SessionWorkbench } from './components/workbench/SessionWorkbench';
 import { ObservabilityHub } from './components/observability/ObservabilityHub';
+import { SettingsPage } from './components/settings/SettingsPage';
+import { WorkflowGuidePage } from './components/workbench/WorkflowGuidePage';
 import { api } from './api/client';
 import { WifiOff } from 'lucide-react';
 
@@ -96,7 +98,7 @@ function AppContent() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors selection:bg-indigo-500/20 selection:text-indigo-600 dark:selection:text-indigo-300">
+    <div className="app-shell min-h-screen flex flex-col transition-colors selection:bg-indigo-500/20 selection:text-indigo-600 dark:selection:text-indigo-300">
       {/* Offline Alert Banner */}
       {isOffline && (
         <div className="bg-rose-600 text-white px-4 py-2 text-xs font-medium flex items-center justify-center gap-2 shadow-sm">
@@ -148,6 +150,10 @@ function AppContent() {
             onSelectSession={handleSelectSession}
           />
         )}
+
+        {activeTab === 'workflow' && <WorkflowGuidePage />}
+
+        {activeTab === 'settings' && <SettingsPage />}
       </main>
 
       {/* New Research Session Modal */}

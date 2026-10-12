@@ -8,7 +8,7 @@ import {
 import { Button } from '../common/Button';
 import { EmptyState } from '../common/EmptyState';
 
-export function SessionEventsLog({ events = [], loading, onRefresh }) {
+export function SessionEventsLog({ events = [], error, loading, onRefresh }) {
   const [expandedId, setExpandedId] = useState(null);
   const [levelFilter, setLevelFilter] = useState('all');
 
@@ -33,7 +33,7 @@ export function SessionEventsLog({ events = [], loading, onRefresh }) {
     }
   };
 
-  if (events.length === 0 && !loading) {
+  if (events.length === 0 && !loading && !error) {
     return (
       <EmptyState
         icon={Terminal}
@@ -45,6 +45,16 @@ export function SessionEventsLog({ events = [], loading, onRefresh }) {
 
   return (
     <div className="space-y-4">
+      {error && (
+        <div
+          role="alert"
+          className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800 dark:border-rose-900/70 dark:bg-rose-950/30 dark:text-rose-200"
+        >
+          <p className="font-semibold">Could not load node logs</p>
+          <p className="mt-1">{error}</p>
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-3 pb-2 border-b border-slate-200 dark:border-slate-800">
         <div className="flex items-center gap-2">
@@ -87,7 +97,11 @@ export function SessionEventsLog({ events = [], loading, onRefresh }) {
 
       {/* Events Timeline */}
       <div className="space-y-2 font-mono text-xs">
-        {filteredEvents.map((evt) => {
+        {filteredEvents.length === 0 && !loading ? (
+          <p className="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center font-sans text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+            {error ? 'Node logs are unavailable. Refresh to try again.' : 'No events match this filter.'}
+          </p>
+        ) : filteredEvents.map((evt) => {
           const isExpanded = expandedId === evt.id;
           const durationStr = formatDuration(evt.duration_ms);
           const hasDetails = evt.details && Object.keys(evt.details).length > 0;

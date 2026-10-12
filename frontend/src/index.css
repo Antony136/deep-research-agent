@@ -1,10 +1,52 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer base {
   :root {
-    color-scheme: light dark;
+    color-scheme: light;
     --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  :root[data-font-size='small'] {
+    font-size: 14px;
+  }
+
+  :root[data-font-size='medium'] {
+    font-size: 16px;
+  }
+
+  :root[data-font-size='large'] {
+    font-size: 18px;
+  }
+
+  :root[data-theme='light'] {
+    --app-canvas: #f8fafc;
+    --app-text: #0f172a;
+    --app-surface: #ffffff;
+    --app-accent: #4f46e5;
+  }
+
+  :root[data-theme='dark'] {
+    --app-canvas: #020617;
+    --app-text: #f1f5f9;
+    --app-surface: #0f172a;
+    --app-accent: #818cf8;
+  }
+
+  :root[data-theme='warm'] {
+    --app-canvas: #f4efe6;
+    --app-text: #292524;
+    --app-surface: #fffdf8;
+    --app-accent: #b45309;
+  }
+
+  :root[data-theme='amethyst'] {
+    --app-canvas: #171321;
+    --app-text: #f4effa;
+    --app-surface: #241d30;
+    --app-accent: #c4a7ff;
   }
 
   body {
@@ -14,6 +56,29 @@
   code, pre, kbd {
     font-family: var(--font-mono);
   }
+}
+
+.app-shell {
+  background-color: var(--app-canvas);
+  color: var(--app-text);
+}
+
+html[data-theme='amethyst'] .bg-slate-950,
+html[data-theme='amethyst'] .dark\:bg-slate-950:is(.dark *) {
+  background-color: var(--app-canvas);
+}
+
+html[data-theme='amethyst'] .dark\:bg-slate-900:is(.dark *) {
+  background-color: var(--app-surface);
+}
+
+html[data-reduce-motion='true'] *,
+html[data-reduce-motion='true'] *::before,
+html[data-reduce-motion='true'] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
 }
 
 /* Custom scrollbars */
