@@ -4,193 +4,245 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
-  CheckCircle2,
   Maximize2,
   Minus,
   Plus,
   RotateCcw,
   Workflow,
-  XCircle,
 } from 'lucide-react';
-import { WORKFLOW_NODES } from './workflowNodes';
 
-const NODE_WIDTH = 184;
-const NODE_HEIGHT = 76;
-const GRAPH_WIDTH = 2300;
-const GRAPH_HEIGHT = 1060;
+import { useTheme } from '../../context/ThemeContext';
+import {
+  GRAPH_CONTENT_BOUNDS,
+  GRAPH_EDGES,
+  GRAPH_HEIGHT,
+  GRAPH_NODES,
+  GRAPH_WIDTH,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  NODE_HEIGHT,
+  NODE_WIDTH,
+  getActiveNode,
+  getEdgePoints,
+} from './workflowGraphModel';
 
-// Explicit routes keep the main path readable and reserve separate lanes
-// for loops and review decisions.
-const EDGES = [
-  { from: '__start__', to: 'planner', d: 'M202 170 H288', label: 'Start' },
-  { from: 'planner', to: 'initial_plan_review', d: 'M472 170 H558', label: 'Create plan' },
-  { from: 'initial_plan_review', to: 'initial_research_review', d: 'M742 170 H828', label: 'Approve plan' },
-  { from: 'initial_plan_review', to: 'initial_plan_review', d: 'M650 132 V105 H690 V132', label: 'Revise', labelX: 690, labelY: 92 },
-  { from: 'initial_plan_review', to: '__end__', d: 'M650 208 V840 H1900 V930 H1908', label: 'Reject', labelX: 700, labelY: 824 },
-  { from: 'initial_research_review', to: 'researcher', d: 'M1012 170 H1098', label: 'Authorize' },
-  { from: 'initial_research_review', to: '__end__', d: 'M920 208 V875 H1900 V930 H1908', label: 'Stop', labelX: 965, labelY: 859 },
-  { from: 'researcher', to: 'evidence_extractor', d: 'M1282 170 H1368', label: 'Sources' },
-  { from: 'evidence_extractor', to: 'evidence_verifier', d: 'M1552 170 H1638', label: 'Extract claims' },
-  { from: 'evidence_verifier', to: 'research_sufficiency', d: 'M1822 170 H1908', label: 'Verified evidence' },
-  { from: 'research_sufficiency', to: 'researcher', d: 'M2000 132 V70 H1190 V132', label: 'Next question', labelX: 1580, labelY: 52 },
-  { from: 'research_sufficiency', to: 'adaptive_planner', d: 'M2000 208 V402', label: 'Evidence gaps', labelX: 2070, labelY: 300 },
-  { from: 'research_sufficiency', to: 'synthesizer', d: 'M2092 170 H2190 V402 H2092', label: 'Sufficient evidence', labelX: 2180, labelY: 290 },
-  { from: 'adaptive_planner', to: 'adaptive_review', d: 'M1908 440 H1830 V642', label: 'Request review', labelX: 1840, labelY: 540 },
-  { from: 'adaptive_planner', to: 'auto_accept_adaptive', d: 'M2000 478 V642', label: 'Auto-approve', labelX: 2070, labelY: 560 },
-  { from: 'adaptive_review', to: 'researcher', d: 'M1638 680 H1570 V790 H1190 V208', label: 'Approved questions', labelX: 1390, labelY: 772 },
-  { from: 'adaptive_review', to: 'synthesizer', d: 'M1822 680 H1870 V550 H2000 V478', label: 'Decline follow-ups', labelX: 1900, labelY: 530 },
-  { from: 'auto_accept_adaptive', to: 'researcher', d: 'M2000 718 V825 H1190 V208', label: 'Continue research', labelX: 1570, labelY: 807 },
-  { from: 'auto_accept_adaptive', to: 'synthesizer', d: 'M2092 680 H2190 V478 H2092', label: 'No follow-ups', labelX: 2190, labelY: 580 },
-  { from: 'synthesizer', to: 'final_report_review', d: 'M2000 402 V208', label: 'Draft report', labelX: 2070, labelY: 310 },
-  { from: 'final_report_review', to: 'adaptive_planner', d: 'M1908 170 H1870 V350 H2000 V402', label: 'Research more', labelX: 1880, labelY: 330 },
-  { from: 'final_report_review', to: '__end__', d: 'M2092 208 H2220 V930 H2092', label: 'Approve report', labelX: 2180, labelY: 860 },
-];
+const ZOOM_STEP = 0.1;
+const PAN_MARGIN = 24;
+const FIT_PADDING = 42;
 
-const STATUS_CLASSES = {
-  completed: 'border-emerald-400 bg-emerald-50 text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-100',
-  active: 'border-sky-500 bg-sky-50 text-sky-950 ring-2 ring-sky-400/40 shadow-lg dark:border-sky-500 dark:bg-sky-950 dark:text-sky-100',
-  waiting: 'border-amber-400 bg-amber-50 text-amber-950 ring-2 ring-amber-400/30 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100',
-  failed: 'border-rose-400 bg-rose-50 text-rose-950 dark:border-rose-700 dark:bg-rose-950 dark:text-rose-100',
-  pending: 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300',
-};
+function constrainPan(pan, zoom, viewport) {
+  const clampAxis = (offset, viewportSize, start, end) => {
+    const scaledStart = start * zoom;
+    const scaledSize = (end - start) * zoom;
 
-function getCurrentNode(events, status) {
-  if (status !== 'running') return null;
+    if (scaledSize <= viewportSize - PAN_MARGIN * 2) {
+      return (viewportSize - scaledSize) / 2 - scaledStart;
+    }
 
-  const latestStart = [...events].reverse().find(
-    (event) => event.node_name && event.event_type === 'node_started',
-  );
+    return Math.min(
+      PAN_MARGIN - scaledStart,
+      Math.max(viewportSize - end * zoom - PAN_MARGIN, offset),
+    );
+  };
 
-  if (!latestStart) return null;
-
-  const finished = events.some(
-    (event) =>
-      event.node_name === latestStart.node_name &&
-      event.id > latestStart.id &&
-      ['node_completed', 'node_failed', 'node_interrupted'].includes(event.event_type),
-  );
-
-  return finished ? null : latestStart.node_name;
+  return {
+    x: clampAxis(
+      pan.x,
+      viewport.clientWidth,
+      GRAPH_CONTENT_BOUNDS.left,
+      GRAPH_CONTENT_BOUNDS.right,
+    ),
+    y: clampAxis(
+      pan.y,
+      viewport.clientHeight,
+      GRAPH_CONTENT_BOUNDS.top,
+      GRAPH_CONTENT_BOUNDS.bottom,
+    ),
+  };
 }
 
-function IconButton({ label, onClick, children }) {
+function IconButton({ label, onClick, children, disabled = false }) {
   return (
     <button
       type="button"
       title={label}
       aria-label={label}
       onClick={onClick}
-      className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+      disabled={disabled}
+      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
     >
       {children}
     </button>
   );
 }
 
-export function WorkflowGraph({ session, pendingReview, events = [] }) {
+function edgePath(edge, nodesById) {
+  return getEdgePoints(edge, nodesById)
+    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`)
+    .join(' ');
+}
+
+function getFitZoom(viewport) {
+  const availableWidth = Math.max(1, viewport.clientWidth - FIT_PADDING * 2);
+  const availableHeight = Math.max(1, viewport.clientHeight - FIT_PADDING * 2);
+  const contentWidth = GRAPH_CONTENT_BOUNDS.right - GRAPH_CONTENT_BOUNDS.left;
+  const contentHeight = GRAPH_CONTENT_BOUNDS.bottom - GRAPH_CONTENT_BOUNDS.top;
+
+  return Math.min(
+    MAX_ZOOM,
+    Math.max(MIN_ZOOM, Math.min(availableWidth / contentWidth, availableHeight / contentHeight)),
+  );
+}
+
+export function WorkflowGraph({ session, events = [], pendingReview = null }) {
   const viewportRef = useRef(null);
   const dragRef = useRef(null);
-  const [zoom, setZoom] = useState(0.5);
-  const [pan, setPan] = useState({ x: 16, y: 16 });
+  const hasNavigatedRef = useRef(false);
+  const zoomRef = useRef(MIN_ZOOM);
+  const minZoomRef = useRef(MIN_ZOOM);
+  const { resolvedTheme, reduceMotion } = useTheme();
+
+  const [zoom, setZoom] = useState(MIN_ZOOM);
+  const [minZoom, setMinZoom] = useState(MIN_ZOOM);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
 
-  const status = session?.status;
-  const researchState = useMemo(() => session?.research_state || {}, [session?.research_state]);
-  const questions = researchState.research_questions || [];
-  const reviewType = pendingReview?.type;
-  const currentNode = getCurrentNode(events, status);
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
 
-  const graphNodes = useMemo(() => WORKFLOW_NODES, []);
-
-  const getNodeStatus = useCallback((node) => {
-    if (node.id === '__start__') {
-      return events.length || ['running', 'waiting_for_review', 'completed'].includes(status)
-        ? 'completed'
-        : 'pending';
-    }
-
-    if (node.id === '__end__') {
-      return status === 'completed' ? 'completed' : 'pending';
-    }
-
-    const reviewNode = reviewType === 'adaptive_research_review'
-      ? 'adaptive_review'
-      : reviewType;
-
-    if (status === 'waiting_for_review' && node.id === reviewNode) {
-      return 'waiting';
-    }
-
-    const nodeEvents = events.filter((event) => event.node_name === node.id);
-    const lastEvent = nodeEvents.at(-1)?.event_type;
-
-    if (lastEvent === 'node_failed') return 'failed';
-    if (lastEvent === 'node_interrupted') return 'waiting';
-    if (currentNode === node.id) return 'active';
-    if (lastEvent === 'node_completed') return 'completed';
-
-    if (node.id === 'planner' && questions.length) return 'completed';
-    if (node.id === 'initial_plan_review' && researchState.initial_plan_approved) return 'completed';
-    if (node.id === 'initial_research_review' && researchState.research_authorized) return 'completed';
-    if (node.id === 'evidence_verifier' && (researchState.evidence || []).length) return 'completed';
-    if (node.id === 'synthesizer' && (session?.final_report || researchState.report)) return 'completed';
-    if (node.id === 'final_report_review' && researchState.final_report_approved) return 'completed';
-
-    return 'pending';
-  }, [currentNode, events, questions.length, researchState, reviewType, session, status]);
-
-  const zoomBy = (amount) => {
-    setZoom((value) => Math.min(1.25, Math.max(0.25, Number((value + amount).toFixed(2)))));
-  };
-
-  const panBy = (dx, dy) => {
-    setPan((value) => ({ x: value.x + dx, y: value.y + dy }));
-  };
+  const nodesById = useMemo(
+    () => Object.fromEntries(GRAPH_NODES.map((node) => [node.id, node])),
+    [],
+  );
+  const activeNode = getActiveNode(events, session?.status, pendingReview);
+  const isDark = resolvedTheme === 'dark';
 
   const fitGraph = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
 
-    const padding = 48;
-    const nextZoom = Math.min(
-      1.25,
-      Math.max(0.25, Math.min(
-        (viewport.clientWidth - padding) / GRAPH_WIDTH,
-        (viewport.clientHeight - padding) / GRAPH_HEIGHT,
-      )),
-    );
+    const nextZoom = getFitZoom(viewport);
 
+    minZoomRef.current = nextZoom;
+    setMinZoom(nextZoom);
+    zoomRef.current = nextZoom;
     setZoom(nextZoom);
-    setPan({
-      x: Math.max(12, (viewport.clientWidth - GRAPH_WIDTH * nextZoom) / 2),
-      y: Math.max(12, (viewport.clientHeight - GRAPH_HEIGHT * nextZoom) / 2),
-    });
+    setPan(constrainPan({ x: 0, y: 0 }, nextZoom, viewport));
   }, []);
 
   useEffect(() => {
-    fitGraph();
     const viewport = viewportRef.current;
-    if (!viewport || typeof ResizeObserver === 'undefined') return undefined;
+    if (!viewport) return undefined;
 
-    const observer = new ResizeObserver(() => fitGraph());
+    const initialFrame = requestAnimationFrame(fitGraph);
+    const observer = new ResizeObserver(() => {
+      if (!hasNavigatedRef.current) {
+        fitGraph();
+      } else {
+        const nextMinZoom = getFitZoom(viewport);
+        const nextZoom = Math.max(nextMinZoom, zoomRef.current);
+        minZoomRef.current = nextMinZoom;
+        setMinZoom(nextMinZoom);
+        zoomRef.current = nextZoom;
+        setZoom(nextZoom);
+        setPan((currentPan) =>
+          constrainPan(currentPan, nextZoom, viewport),
+        );
+      }
+    });
+
     observer.observe(viewport);
-
-    return () => observer.disconnect();
+    return () => {
+      cancelAnimationFrame(initialFrame);
+      observer.disconnect();
+    };
   }, [fitGraph]);
+
+  const markNavigated = () => {
+    hasNavigatedRef.current = true;
+  };
+
+  const zoomAt = useCallback((nextZoom, point) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const clampedZoom = Math.min(
+      MAX_ZOOM,
+      Math.max(minZoomRef.current, nextZoom),
+    );
+    if (clampedZoom === zoom) return;
+
+    markNavigated();
+    const ratio = clampedZoom / zoom;
+    setPan((currentPan) =>
+      constrainPan(
+        {
+          x: point.x - (point.x - currentPan.x) * ratio,
+          y: point.y - (point.y - currentPan.y) * ratio,
+        },
+        clampedZoom,
+        viewport,
+      ),
+    );
+    zoomRef.current = clampedZoom;
+    setZoom(clampedZoom);
+  }, [zoom]);
+
+  const zoomBy = useCallback((amount) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    zoomAt(zoom + amount, {
+      x: viewport.clientWidth / 2,
+      y: viewport.clientHeight / 2,
+    });
+  }, [zoom, zoomAt]);
+
+  const panBy = (dx, dy) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    markNavigated();
+    setPan((currentPan) =>
+      constrainPan(
+        { x: currentPan.x + dx, y: currentPan.y + dy },
+        zoom,
+        viewport,
+      ),
+    );
+  };
+
+  const resetGraph = () => {
+    hasNavigatedRef.current = false;
+    fitGraph();
+  };
 
   const onPointerDown = (event) => {
     if (event.button !== 0 || event.target.closest('button')) return;
-    dragRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
+
+    dragRef.current = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      panX: pan.x,
+      panY: pan.y,
+    };
+
+    markNavigated();
     setDragging(true);
-    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const onPointerMove = (event) => {
     if (!dragRef.current) return;
-    setPan({
-      x: dragRef.current.panX + event.clientX - dragRef.current.x,
-      y: dragRef.current.panY + event.clientY - dragRef.current.y,
-    });
+    setPan(
+      constrainPan(
+        {
+          x: dragRef.current.panX + event.clientX - dragRef.current.pointerX,
+          y: dragRef.current.panY + event.clientY - dragRef.current.pointerY,
+        },
+        zoom,
+        event.currentTarget,
+      ),
+    );
   };
 
   const stopDragging = () => {
@@ -198,213 +250,260 @@ export function WorkflowGraph({ session, pendingReview, events = [] }) {
     setDragging(false);
   };
 
-  const fitToView = () => fitGraph();
+  const onKeyDown = (event) => {
+    if (event.target !== event.currentTarget) return;
+
+    const panKeys = {
+      ArrowLeft: [60, 0],
+      ArrowRight: [-60, 0],
+      ArrowUp: [0, 60],
+      ArrowDown: [0, -60],
+    };
+
+    if (panKeys[event.key]) {
+      event.preventDefault();
+      panBy(...panKeys[event.key]);
+    } else if (event.key === '+' || event.key === '=') {
+      event.preventDefault();
+      zoomBy(ZOOM_STEP);
+    } else if (event.key === '-') {
+      event.preventDefault();
+      zoomBy(-ZOOM_STEP);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      resetGraph();
+    }
+  };
+
+  const zoomAtPointer = (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    zoomAt(zoom + (event.deltaY < 0 ? 0.05 : -0.05), {
+      x: event.clientX - bounds.left,
+      y: event.clientY - bounds.top,
+    });
+  };
+
+  const edgeColor = isDark ? '#64748b' : '#94a3b8';
+  const labelColor = isDark ? '#cbd5e1' : '#475569';
+  const labelFill = isDark ? '#111827' : '#ffffff';
+  const labelBorder = isDark ? '#334155' : '#cbd5e1';
 
   return (
-    <div className="min-w-0 space-y-5">
-      <section className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
-        <header className="flex flex-col justify-between gap-4 border-b border-slate-200 p-4 dark:border-slate-800 lg:flex-row lg:items-center">
-          <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-              <Workflow className="h-4 w-4 text-indigo-500" />
-              LangGraph Execution
-            </h2>
-            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Explore the research flow, approval checkpoints, and adaptive research routes.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <IconButton label="Zoom out" onClick={() => zoomBy(-0.1)}>
-              <Minus className="h-4 w-4" />
-            </IconButton>
-            <span className="w-12 text-center text-xs font-semibold tabular-nums text-slate-600 dark:text-slate-300">
-              {Math.round(zoom * 100)}%
-            </span>
-            <IconButton label="Zoom in" onClick={() => zoomBy(0.1)}>
-              <Plus className="h-4 w-4" />
-            </IconButton>
-            <IconButton label="Fit graph to viewport" onClick={fitToView}>
-              <Maximize2 className="h-4 w-4" />
-            </IconButton>
-            <IconButton label="Reset graph" onClick={() => { setZoom(0.5); setPan({ x: 16, y: 16 }); }}>
-              <RotateCcw className="h-4 w-4" />
-            </IconButton>
-          </div>
-        </header>
-
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-100 bg-slate-50 px-4 py-3 text-[11px] text-slate-500 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-400">
-          {[
-            ['bg-emerald-500', 'Completed'],
-            ['bg-sky-500', 'Running'],
-            ['bg-amber-500', 'Awaiting review'],
-            ['bg-rose-500', 'Failed'],
-            ['bg-slate-400', 'Upcoming'],
-          ].map(([color, label]) => (
-            <span key={label} className="inline-flex items-center gap-1.5">
-              <span className={`h-2 w-2 rounded-full ${color}`} />
-              {label}
-            </span>
-          ))}
-        </div>
-
-        <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-2 dark:border-slate-800">
-          <span className="text-[11px] text-slate-500 dark:text-slate-400">Move graph</span>
-          <div className="flex items-center gap-1">
-            <IconButton label="Move left" onClick={() => panBy(60, 0)}><ArrowLeft className="h-4 w-4" /></IconButton>
-            <IconButton label="Move up" onClick={() => panBy(0, 60)}><ArrowUp className="h-4 w-4" /></IconButton>
-            <IconButton label="Move down" onClick={() => panBy(0, -60)}><ArrowDown className="h-4 w-4" /></IconButton>
-            <IconButton label="Move right" onClick={() => panBy(-60, 0)}><ArrowRight className="h-4 w-4" /></IconButton>
-          </div>
-        </div>
-
-        <div
-          ref={viewportRef}
-          className={`relative h-[560px] w-full overflow-hidden ${
-            dragging ? 'cursor-grabbing' : 'cursor-grab'
-          }`}
-          style={{
-            backgroundColor: '#f8fafc',
-            backgroundImage: 'radial-gradient(circle, rgba(148,163,184,.28) 1px, transparent 1px)',
-            backgroundSize: '22px 22px',
-            touchAction: 'none',
-          }}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={stopDragging}
-          onPointerCancel={stopDragging}
-          onWheel={(event) => {
-            if (event.ctrlKey || event.metaKey) {
-              event.preventDefault();
-              zoomBy(event.deltaY < 0 ? 0.05 : -0.05);
-            }
-          }}
-          tabIndex={0}
-          aria-label="Interactive research workflow. Drag to pan and hold Ctrl or Cmd while scrolling to zoom."
-        >
-          <div
-            className="absolute left-0 top-0"
-            style={{
-              width: GRAPH_WIDTH,
-              height: GRAPH_HEIGHT,
-              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-              transformOrigin: 'top left',
-              transition: dragging ? 'none' : 'transform 100ms ease-out',
-            }}
-          >
-            <svg
-              className="pointer-events-none absolute left-0 top-0"
-              width={GRAPH_WIDTH}
-              height={GRAPH_HEIGHT}
-              viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
-              aria-hidden="true"
-            >
-              <defs>
-                <marker
-                  id="workflow-arrow"
-                  markerWidth="9"
-                  markerHeight="9"
-                  refX="7"
-                  refY="4.5"
-                  orient="auto"
-                >
-                  <path d="M1 1 L8 4.5 L1 8" fill="none" stroke="#94a3b8" strokeWidth="1.5" />
-                </marker>
-              </defs>
-
-              {EDGES.map((edge, index) => (
-                <g key={`${edge.from}-${edge.to}-${index}`}>
-                  <path
-                    d={edge.d}
-                    fill="none"
-                    stroke="#94a3b8"
-                    strokeWidth="2"
-                    strokeLinejoin="round"
-                    strokeLinecap="round"
-                    markerEnd="url(#workflow-arrow)"
-                  />
-                  {edge.label && (
-                    <g transform={`translate(${edge.labelX ?? ((WORKFLOW_NODES.find(n => n.id === edge.from)?.x + WORKFLOW_NODES.find(n => n.id === edge.to)?.x) / 2)}, ${edge.labelY ?? ((WORKFLOW_NODES.find(n => n.id === edge.from)?.y + WORKFLOW_NODES.find(n => n.id === edge.to)?.y) / 2 - 16)})`}>
-                      <rect
-                        x={-Math.max(34, edge.label.length * 3.3)}
-                        y="-10"
-                        width={Math.max(68, edge.label.length * 6.6)}
-                        height="20"
-                        rx="5"
-                        fill="#f8fafc"
-                        stroke="#e2e8f0"
-                      />
-                      <text
-                        textAnchor="middle"
-                        y="3.5"
-                        fontSize="10"
-                        fontWeight="600"
-                        fill="#475569"
-                      >
-                        {edge.label}
-                      </text>
-                    </g>
-                  )}
-                </g>
-              ))}
-            </svg>
-
-            {graphNodes.map((node) => {
-              const nodeStatus = getNodeStatus(node);
-              const Icon = nodeStatus === 'completed'
-                ? CheckCircle2
-                : nodeStatus === 'failed'
-                  ? XCircle
-                  : node.icon;
-
-              return (
-                <div
-                  key={node.id}
-                  className={`absolute box-border flex items-center gap-3 rounded-xl border px-3 py-3 shadow-sm ${STATUS_CLASSES[nodeStatus]}`}
-                  style={{
-                    left: node.x - NODE_WIDTH / 2,
-                    top: node.y - NODE_HEIGHT / 2,
-                    width: NODE_WIDTH,
-                    height: NODE_HEIGHT,
-                  }}
-                  title={node.description}
-                  aria-label={`${node.label}: ${nodeStatus}`}
-                >
-                  <Icon className="h-5 w-5 shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="break-words text-xs font-semibold leading-tight">{node.label}</span>
-                      {node.hitl && (
-                        <span className="shrink-0 rounded bg-indigo-100 px-1 py-0.5 text-[8px] font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
-                          HITL
-                        </span>
-                      )}
-                    </div>
-                    <span className="mt-1 block text-[10px] capitalize opacity-70">
-                      {nodeStatus === 'active' ? 'Running now' : nodeStatus === 'waiting' ? 'Awaiting review' : nodeStatus}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <footer className="border-t border-slate-200 px-4 py-3 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
-          Drag to pan. Use the directional controls to move in 60 px steps. Hold Ctrl/Cmd while scrolling to zoom.
-        </footer>
-      </section>
-
-      <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-        <div className="mb-4 border-b border-slate-100 pb-4 dark:border-slate-800">
-          <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Workflow Node Guide</h2>
+    <section className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+      <header className="flex flex-col justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-800 sm:flex-row sm:items-center">
+        <div>
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+            <Workflow className="h-4 w-4 text-indigo-500" />
+            LangGraph Execution
+          </h2>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            A reference guide to each node and its responsibility. Execution status is shown only in the graph above.
+            The executing node is highlighted as the workflow progresses.
           </p>
         </div>
 
-      </section>
-    </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <IconButton
+            label="Zoom out"
+            onClick={() => zoomBy(-ZOOM_STEP)}
+            disabled={zoom <= minZoom}
+          >
+            <Minus className="h-4 w-4" />
+          </IconButton>
+          <span className="w-12 text-center text-xs font-semibold tabular-nums text-slate-600 dark:text-slate-300">
+            {Math.round(zoom * 100)}%
+          </span>
+          <IconButton
+            label="Zoom in"
+            onClick={() => zoomBy(ZOOM_STEP)}
+            disabled={zoom >= MAX_ZOOM}
+          >
+            <Plus className="h-4 w-4" />
+          </IconButton>
+          <IconButton label="Fit graph to screen" onClick={resetGraph}>
+            <Maximize2 className="h-4 w-4" />
+          </IconButton>
+          <IconButton label="Reset graph view" onClick={resetGraph}>
+            <RotateCcw className="h-4 w-4" />
+          </IconButton>
+        </div>
+      </header>
+
+      <div className="flex items-center justify-end gap-1 border-b border-slate-100 px-4 py-2 dark:border-slate-800">
+        <span className="mr-auto text-[11px] text-slate-500 dark:text-slate-400">
+          Move workflow
+        </span>
+        <IconButton label="Move left" onClick={() => panBy(60, 0)}>
+          <ArrowLeft className="h-4 w-4" />
+        </IconButton>
+        <IconButton label="Move up" onClick={() => panBy(0, 60)}>
+          <ArrowUp className="h-4 w-4" />
+        </IconButton>
+        <IconButton label="Move down" onClick={() => panBy(0, -60)}>
+          <ArrowDown className="h-4 w-4" />
+        </IconButton>
+        <IconButton label="Move right" onClick={() => panBy(-60, 0)}>
+          <ArrowRight className="h-4 w-4" />
+        </IconButton>
+      </div>
+
+      <div
+        ref={viewportRef}
+        className={`relative h-[min(78vh,820px)] min-h-[540px] w-full overflow-hidden select-none ${
+          dragging ? 'cursor-grabbing' : 'cursor-grab'
+        }`}
+        style={{
+          backgroundColor: isDark ? '#0b1120' : '#f8fafc',
+          backgroundImage: isDark
+            ? 'radial-gradient(circle, rgba(148,163,184,.13) 1px, transparent 1px)'
+            : 'radial-gradient(circle, rgba(100,116,139,.18) 1px, transparent 1px)',
+          backgroundSize: '24px 24px',
+          touchAction: 'none',
+        }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={stopDragging}
+        onPointerCancel={stopDragging}
+        onLostPointerCapture={stopDragging}
+        onWheel={zoomAtPointer}
+        onKeyDown={onKeyDown}
+        tabIndex={0}
+        role="application"
+        aria-label="Interactive LangGraph workflow. Drag to move. Use arrow keys to pan, plus and minus to zoom, or Home to fit."
+      >
+        <div
+          className="absolute left-0 top-0"
+          style={{
+            width: GRAPH_WIDTH,
+            height: GRAPH_HEIGHT,
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            transformOrigin: 'top left',
+            transition: 'none',
+            willChange: 'transform',
+          }}
+        >
+          <svg
+            className="pointer-events-none absolute left-0 top-0 overflow-visible"
+            width={GRAPH_WIDTH}
+            height={GRAPH_HEIGHT}
+            viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
+            role="img"
+            aria-label="Workflow connections"
+          >
+            <defs>
+              <marker
+                id="workflow-arrow"
+                markerWidth="9"
+                markerHeight="9"
+                refX="7"
+                refY="4.5"
+                orient="auto"
+                markerUnits="userSpaceOnUse"
+              >
+                <path
+                  d="M1 1 L8 4.5 L1 8"
+                  fill="none"
+                  stroke={edgeColor}
+                  strokeWidth="1.5"
+                />
+              </marker>
+            </defs>
+
+            {GRAPH_EDGES.map((edge, index) => (
+              <g key={`${edge.from}-${edge.to}-${index}`}>
+                <path
+                  d={edgePath(edge, nodesById)}
+                  fill="none"
+                  stroke={edgeColor}
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  markerEnd="url(#workflow-arrow)"
+                />
+                <g transform={`translate(${edge.labelX}, ${edge.labelY})`}>
+                  <rect
+                    x={-Math.max(28, edge.label.length * 3.3)}
+                    y="-9"
+                    width={Math.max(56, edge.label.length * 6.6)}
+                    height="18"
+                    rx="5"
+                    fill={labelFill}
+                    stroke={labelBorder}
+                    strokeWidth="1"
+                  />
+                  <text
+                    textAnchor="middle"
+                    y="3.5"
+                    fontSize="10"
+                    fontWeight="600"
+                    fill={labelColor}
+                  >
+                    {edge.label}
+                  </text>
+                </g>
+              </g>
+            ))}
+          </svg>
+
+          {GRAPH_NODES.map((node) => {
+            const Icon = node.icon;
+            const isActive = node.id === activeNode;
+            const isAwaitingApproval =
+              isActive && session?.status === 'waiting_for_review';
+
+            return (
+              <div
+                key={node.id}
+                className={`absolute box-border flex items-center gap-3 rounded-xl border px-4 py-3 ${
+                  isActive
+                    ? 'z-10 border-cyan-400 bg-cyan-100 text-slate-950 shadow-[0_0_0_4px_rgba(34,211,238,0.18),0_0_28px_rgba(34,211,238,0.28)] dark:border-cyan-300 dark:bg-cyan-950 dark:text-cyan-50 dark:shadow-[0_0_0_4px_rgba(34,211,238,0.2),0_0_32px_rgba(34,211,238,0.25)]'
+                    : 'z-0 border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'
+                }`}
+                style={{
+                  left: node.x - NODE_WIDTH / 2,
+                  top: node.y - NODE_HEIGHT / 2,
+                  width: NODE_WIDTH,
+                  height: NODE_HEIGHT,
+                  transition: reduceMotion ? 'none' : 'background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease',
+                }}
+                aria-label={
+                  isActive
+                    ? isAwaitingApproval
+                      ? `${node.label}, awaiting approval`
+                      : `${node.label}, currently executing`
+                    : node.label
+                }
+                role="img"
+              >
+                <Icon
+                  className={`h-5 w-5 shrink-0 ${
+                    isActive
+                      ? 'text-cyan-700 dark:text-cyan-300'
+                      : 'text-slate-400 dark:text-slate-500'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 text-sm font-semibold leading-tight">
+                  {node.label}
+                </span>
+                {isActive && (
+                  <span
+                    className="absolute right-3 top-3 h-2.5 w-2.5 rounded-full bg-cyan-500 shadow-[0_0_12px_rgba(6,182,212,0.8)] motion-safe:animate-pulse"
+                    aria-hidden="true"
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <footer className="border-t border-slate-200 px-4 py-3 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
+        Drag to pan. Use the arrow controls or keyboard arrows to move. Hold
+        Ctrl/Cmd while scrolling to zoom.
+      </footer>
+    </section>
   );
 }
 

@@ -302,8 +302,8 @@ export function SessionWorkbench({
       {/* Agent Workflow Pipeline Visualizer */}
       <WorkflowGraph
         session={session}
-        pendingReview={pendingReview}
         events={events}
+        pendingReview={pendingReview}
       />
 
       {/* Workbench Tabbed Section */}

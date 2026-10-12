@@ -14,17 +14,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
+from app.observability.tracing import configure_observability
 
 
 load_dotenv()
-
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format=(
-        "%(asctime)s | %(levelname)s | "
-        "%(name)s | %(message)s"
-    ),
-)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +26,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown."""
 
+    configure_observability()
     logger.info("Starting Deep Research Agent API.")
 
     yield
