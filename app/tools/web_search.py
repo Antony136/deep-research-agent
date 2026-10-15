@@ -64,8 +64,8 @@ def search_web(
 
     Notes
     -----
-    A failed search returns an empty list instead of
-    crashing the entire research workflow.
+    Exhausted provider failures propagate so the durable
+    worker can retry the current graph node from its checkpoint.
     """
 
     if not query.strip():
@@ -127,15 +127,11 @@ def search_web(
                 print(f"    Search failed: {exc}")
                 if attempt >= max_retries:
                     print("    Giving up on this query.")
-                    return []
+                    raise
 
                 jitter = random.uniform(0.5, 1.5)
                 retry_delay = (4 * (2 ** attempt)) + jitter
                 print(f"    Retrying in {retry_delay:.1f} seconds...")
                 time.sleep(retry_delay)
-
-            except Exception as exc:
-                print(f"    Unexpected search error: {exc}")
-                return []
 
     return []

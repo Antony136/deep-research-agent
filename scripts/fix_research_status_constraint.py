@@ -1,7 +1,7 @@
 """
 Update the research_sessions status constraint.
 
-Adds 'waiting_for_review' to the allowed session statuses.
+Adds human-review and cancellation statuses to existing sessions.
 """
 
 from app.database.connection import get_connection
@@ -26,7 +26,8 @@ def main():
                         'running',
                         'waiting_for_review',
                         'completed',
-                        'failed'
+                        'failed',
+                        'cancelled'
                     )
                 );
             """)

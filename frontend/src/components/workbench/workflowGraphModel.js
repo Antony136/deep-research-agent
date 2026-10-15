@@ -226,12 +226,21 @@ export function getGraphBounds(nodes, edges) {
   };
 }
 
-export function getActiveNode(events = [], sessionStatus, pendingReview = null) {
+export function getActiveNode(
+  events = [],
+  sessionStatus,
+  pendingReview = null,
+  jobStatus = null,
+) {
   if (sessionStatus === 'waiting_for_review') {
     return REVIEW_NODE_BY_TYPE[pendingReview?.type] || null;
   }
 
-  if (sessionStatus !== 'running' || !Array.isArray(events)) {
+  if (
+    sessionStatus !== 'running' ||
+    jobStatus === 'retry_wait' ||
+    !Array.isArray(events)
+  ) {
     return null;
   }
 

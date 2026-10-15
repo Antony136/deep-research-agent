@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   Activity,
   Layers,
+  StopCircle,
 } from 'lucide-react';
 import { StatusBadge } from '../common/Badge';
 import { Button } from '../common/Button';
@@ -32,6 +33,7 @@ export function SessionsList({
   const [statusFilter, setStatusFilter] = useState('all');
   const [deletingId, setDeletingId] = useState(null);
   const [retryingId, setRetryingId] = useState(null);
+  const [cancellingId, setCancellingId] = useState(null);
 
   // Status Counts
   const stats = useMemo(() => {
@@ -87,6 +89,20 @@ export function SessionsList({
       toast.error(err.message || 'Failed to retry session', 'Retry Failed');
     } finally {
       setRetryingId(null);
+    }
+  };
+
+  const handleCancel = async (e, sessionId) => {
+    e.stopPropagation();
+    setCancellingId(sessionId);
+    try {
+      const result = await api.cancelSession(sessionId);
+      toast.success(result.message || 'Cancellation requested');
+      onRefresh();
+    } catch (err) {
+      toast.error(err.message || 'Failed to cancel session');
+    } finally {
+      setCancellingId(null);
     }
   };
 
@@ -185,6 +201,7 @@ export function SessionsList({
             { id: 'running', label: 'Running' },
             { id: 'completed', label: 'Completed' },
             { id: 'failed', label: 'Failed' },
+            { id: 'cancelled', label: 'Cancelled' },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -238,6 +255,7 @@ export function SessionsList({
           {filteredSessions.map((session) => {
             const isWaiting = session.status === 'waiting_for_review';
             const isRunning = session.status === 'running';
+            const canResumeLegacySession = isRunning && !session.job;
 
             return (
               <Card
@@ -256,6 +274,14 @@ export function SessionsList({
                   <div className="space-y-1.5 flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <StatusBadge status={session.status} size="xs" />
+                      {session.job && (
+                        <>
+                          <StatusBadge status={session.job.status} size="xs" />
+                          <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                            Attempt {session.job.attempt_count}/{session.job.max_attempts}
+                          </span>
+                        </>
+                      )}
                       <span className="text-[11px] font-mono text-slate-400 dark:text-slate-500">
                         {session.id.substring(0, 8)}...
                       </span>
@@ -269,20 +295,39 @@ export function SessionsList({
                     <h3 className="text-sm sm:text-base font-semibold text-slate-900 dark:text-slate-100 line-clamp-2 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
                       {session.question}
                     </h3>
+                    {session.job?.last_error && (
+                      <p className="line-clamp-2 text-xs text-rose-700 dark:text-rose-300">
+                        {session.job.last_error}
+                      </p>
+                    )}
                   </div>
 
                   {/* Actions Bar */}
                   <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
-                    {session.status === 'failed' && (
+                    {['queued', 'running', 'retry_wait', 'awaiting_review'].includes(session.job?.status) && (
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        icon={StopCircle}
+                        isLoading={cancellingId === session.id}
+                        disabled={session.job?.cancel_requested}
+                        onClick={(e) => handleCancel(e, session.id)}
+                        title="Cancel this research job"
+                      >
+                        {session.job?.cancel_requested ? 'Cancel Requested' : 'Cancel'}
+                      </Button>
+                    )}
+
+                    {(session.status === 'failed' || canResumeLegacySession) && (
                       <Button
                         variant="secondary"
                         size="sm"
                         icon={RotateCcw}
                         isLoading={retryingId === session.id}
                         onClick={(e) => handleRetry(e, session.id)}
-                        title="Retry session"
+                        title={canResumeLegacySession ? 'Resume session' : 'Retry session'}
                       >
-                        Retry
+                        {canResumeLegacySession ? 'Resume' : 'Retry'}
                       </Button>
                     )}
 

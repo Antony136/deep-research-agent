@@ -15,6 +15,7 @@ import {
   Copy,
   Check,
   Radio,
+  StopCircle,
 } from 'lucide-react';
 import { StatusBadge } from '../common/Badge';
 import { Button } from '../common/Button';
@@ -42,6 +43,7 @@ export function SessionWorkbench({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [activeTab, setActiveTab] = useState('report');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [copiedId, setCopiedId] = useState(false);
@@ -127,6 +129,19 @@ export function SessionWorkbench({
     }
   };
 
+  const handleCancel = async () => {
+    setCancelling(true);
+    try {
+      const result = await api.cancelSession(sessionId);
+      toast.success(result.message || 'Cancellation requested');
+      await loadSessionData(true);
+    } catch (err) {
+      toast.error(err.message || 'Cancellation failed');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (!window.confirm('Delete this research session and all its stored results?')) {
       return;
@@ -171,6 +186,8 @@ export function SessionWorkbench({
   const questions = researchState.research_questions || [];
   const evidence = researchState.evidence || [];
   const currentQIndex = researchState.current_question_index || 0;
+  const canResumeLegacySession =
+    session.status === 'running' && !session.job;
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12">
@@ -214,7 +231,21 @@ export function SessionWorkbench({
             Refresh
           </Button>
 
-          {session.status === 'failed' && (
+          {['queued', 'running', 'retry_wait', 'awaiting_review'].includes(session.job?.status) && (
+            <Button
+              size="sm"
+              variant="danger"
+              icon={StopCircle}
+              isLoading={cancelling}
+              disabled={session.job?.cancel_requested}
+              onClick={handleCancel}
+              title="Cancel this research job"
+            >
+              {session.job?.cancel_requested ? 'Cancel Requested' : 'Cancel'}
+            </Button>
+          )}
+
+          {(session.status === 'failed' || canResumeLegacySession) && (
             <Button
               size="sm"
               variant="secondary"
@@ -222,7 +253,7 @@ export function SessionWorkbench({
               isLoading={retrying}
               onClick={handleRetry}
             >
-              Retry
+              {canResumeLegacySession ? 'Resume Session' : 'Retry'}
             </Button>
           )}
 
@@ -270,6 +301,28 @@ export function SessionWorkbench({
         <h1 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white leading-snug">
           {session.question}
         </h1>
+
+        {session.job && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/40">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="font-semibold text-slate-600 dark:text-slate-300">Research job</span>
+              <StatusBadge status={session.job.status} size="xs" />
+              <span className="text-slate-500 dark:text-slate-400">
+                Attempt {session.job.attempt_count}/{session.job.max_attempts}
+              </span>
+              {session.job.cancel_requested && (
+                <span className="text-amber-700 dark:text-amber-300">
+                  Cancellation will take effect at the next workflow checkpoint.
+                </span>
+              )}
+            </div>
+            {session.job.last_error && (
+              <p className="mt-2 break-words text-xs text-rose-700 dark:text-rose-300">
+                Latest job error: {session.job.last_error}
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Failed Error Banner */}
         {session.status === 'failed' && (

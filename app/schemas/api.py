@@ -101,6 +101,25 @@ class ReviewDecisionRequest(BaseModel):
 # RESEARCH SESSION RESPONSES
 # ---------------------------------------------------------
 
+class ResearchJobSummary(BaseModel):
+    """Current durable job state shown with a research session."""
+
+    id: str
+    status: Literal[
+        "queued",
+        "running",
+        "retry_wait",
+        "awaiting_review",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    attempt_count: int
+    max_attempts: int
+    cancel_requested: bool = False
+    last_error: str | None = None
+
+
 class ResearchSessionSummary(BaseModel):
     """Compact representation of a research session."""
 
@@ -113,10 +132,12 @@ class ResearchSessionSummary(BaseModel):
         "waiting_for_review",
         "completed",
         "failed",
+        "cancelled",
     ]
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    job: "ResearchJobSummary | None" = None
 
 
 class ResearchSessionResponse(ResearchSessionSummary):
@@ -158,9 +179,16 @@ class ReviewSubmissionResponse(BaseModel):
         "waiting_for_review",
         "completed",
         "failed",
+        "cancelled",
     ]
 
     message: str
+    job_id: str | None = None
+    job_status: str | None = None
+    attempt_count: int | None = None
+    max_attempts: int | None = None
+    cancel_requested: bool = False
+    last_error: str | None = None
 
 
 # ---------------------------------------------------------
@@ -173,6 +201,7 @@ class ResearchCreatedResponse(BaseModel):
     session_id: str
     status: Literal["created", "running"]
     message: str
+    job_id: str | None = None
 
 
 class HealthResponse(BaseModel):
@@ -223,4 +252,3 @@ class APIModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-

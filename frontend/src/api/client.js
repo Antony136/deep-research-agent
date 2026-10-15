@@ -150,6 +150,15 @@ export const api = {
   },
 
   /**
+   * Cancel queued research or request a safe worker stop.
+   */
+  async cancelSession(sessionId) {
+    return request(`/api/research/${encodeURIComponent(sessionId)}/cancel`, {
+      method: 'POST',
+    });
+  },
+
+  /**
    * Delete a research session and all cascaded data.
    */
   async deleteSession(sessionId) {

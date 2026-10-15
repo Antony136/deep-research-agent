@@ -6,7 +6,6 @@ pending human reviews, and review submissions.
 """
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -25,27 +24,25 @@ from app.schemas.api import (
     ReviewSubmissionResponse,
     SessionDeletedResponse,
 )
+from app.job_config import max_job_attempts
+from app.database.repository import (
+    cancel_latest_job,
+    create_session_with_job,
+    enqueue_retry_job,
+    enqueue_review_job,
+)
 from app.services.research_service import (
     get_pending_review,
     get_research_session,
     list_research_sessions,
-    start_research,
-    submit_review,
+    build_initial_state,
+    to_json_compatible,
 )
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["Research"])
-
-# Temporary in-process executor for background research jobs.
-# A durable distributed worker can replace this during
-# production hardening.
-executor = ThreadPoolExecutor(
-    max_workers=4,
-    thread_name_prefix="research-worker",
-)
-
 
 # ---------------------------------------------------------
 # HEALTH
@@ -84,17 +81,6 @@ def create_research(
         )
 
     try:
-        # Create the session immediately so the frontend
-        # receives its ID before the research starts.
-        from app.database.repository import create_session
-
-        session_id = create_session(question)
-
-        from app.services.research_service import (
-            build_initial_state,
-            execute_research,
-        )
-
         initial_state = build_initial_state(
             question=question,
             require_initial_plan_approval=request.require_initial_plan_approval,
@@ -104,18 +90,19 @@ def create_research(
             max_research_rounds=request.max_research_rounds,
             max_total_research_questions=request.max_total_research_questions,
         )
-
-        executor.submit(
-            execute_research,
-            session_id,
-            initial_state,
-            None,
+        session_id, job_id = create_session_with_job(
+            question=question,
+            payload={
+                "initial_state": to_json_compatible(initial_state),
+            },
+            max_attempts=max_job_attempts(),
         )
 
         return ResearchCreatedResponse(
             session_id=str(session_id),
             status="created",
-            message="Research session created and scheduled.",
+            message="Research session and durable job queued.",
+            job_id=str(job_id),
         )
 
     except Exception as exc:
@@ -302,20 +289,26 @@ def submit_review_endpoint(
             decision,
         )
 
-        # Queue only after validation succeeds.
-        from app.services.research_service import execute_research
-
-        executor.submit(
-            execute_research,
-            session_id,
-            None,
-            validated_decision,
-        )
+        try:
+            job = enqueue_review_job(
+                session_id,
+                validated_decision,
+                max_job_attempts(),
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
 
         return ReviewSubmissionResponse(
             session_id=str(session_id),
             status="running",
-            message="Review accepted; research resumption scheduled.",
+            message="Review accepted; research resumption queued.",
+            job_id=job["id"],
+            job_status=job["status"],
+            attempt_count=job["attempt_count"],
+            max_attempts=job["max_attempts"],
         )
 
     except HTTPException:
@@ -351,7 +344,7 @@ def submit_review_endpoint(
 def retry_research(
     session_id: UUID,
 ) -> ReviewSubmissionResponse:
-    """Retry a failed or stalled research session."""
+    """Retry failed work or resume a legacy session without a job record."""
 
     try:
         session = get_research_session(session_id)
@@ -362,33 +355,33 @@ def retry_research(
                 detail="Research session not found.",
             )
 
-        from app.database.repository import update_session_status
-        from app.services.research_service import (
-            build_initial_state,
-            execute_research,
-        )
-
-        update_session_status(session_id, "running")
-
-        initial_state = build_initial_state(
-            question=session["question"],
-        )
-
-        executor.submit(
-            execute_research,
+        initial_state = build_initial_state(session["question"])
+        job = enqueue_retry_job(
             session_id,
-            initial_state,
-            None,
+            max_job_attempts(),
+            fallback_payload={
+                "initial_state": to_json_compatible(initial_state),
+            },
         )
 
         return ReviewSubmissionResponse(
             session_id=str(session_id),
             status="running",
-            message="Research retry scheduled.",
+            message="Research retry queued from its latest checkpoint.",
+            job_id=job["id"],
+            job_status=job["status"],
+            attempt_count=job["attempt_count"],
+            max_attempts=job["max_attempts"],
         )
 
     except HTTPException:
         raise
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
     except Exception as exc:
         logger.exception(
@@ -399,6 +392,57 @@ def retry_research(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not retry the research session.",
+        ) from exc
+
+
+@router.post(
+    "/research/{session_id}/cancel",
+    response_model=ReviewSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def cancel_research(
+    session_id: UUID,
+) -> ReviewSubmissionResponse:
+    """Cancel queued research or request a safe worker stop."""
+
+    try:
+        job = cancel_latest_job(session_id)
+        session_status = (
+            "cancelled"
+            if job["status"] == "cancelled"
+            else "running"
+        )
+        message = (
+            "Research job cancelled."
+            if job["status"] == "cancelled"
+            else "Cancellation requested; the worker will stop at its next checkpoint."
+        )
+        return ReviewSubmissionResponse(
+            session_id=str(session_id),
+            status=session_status,
+            message=message,
+            job_id=job["id"],
+            job_status=job["status"],
+            attempt_count=job["attempt_count"],
+            max_attempts=job["max_attempts"],
+            cancel_requested=job["cancel_requested"],
+            last_error=job["last_error"],
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to cancel research session %s.",
+            session_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not cancel the research session.",
         ) from exc
 
 
@@ -435,6 +479,12 @@ def delete_research_session_endpoint(
 
     except HTTPException:
         raise
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
     except Exception as exc:
         logger.exception(
@@ -531,9 +581,12 @@ def get_metrics_endpoint():
     """Retrieve node execution metrics snapshot."""
 
     try:
-        from app.observability.tracing import get_run_metrics
+        from app.database.repository import get_node_execution_metrics
 
-        return get_run_metrics()
+        return {
+            "started_at": None,
+            "nodes": get_node_execution_metrics(),
+        }
 
     except Exception as exc:
         logger.exception("Failed to retrieve run metrics.")
@@ -542,4 +595,3 @@ def get_metrics_endpoint():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not retrieve run metrics.",
         ) from exc
-

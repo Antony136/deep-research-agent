@@ -9,7 +9,7 @@ research from PostgreSQL checkpoints.
 import logging
 import os
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID
 
 from dotenv import load_dotenv
@@ -32,6 +32,10 @@ from app.graph.graph import build_research_graph
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+class ResearchCancelled(Exception):
+    """Raised when a worker is asked to stop at a graph checkpoint."""
 
 
 # ---------------------------------------------------------
@@ -325,8 +329,12 @@ def stream_graph_updates(
     graph_input: Any,
     config: dict[str, Any],
     session_id: UUID,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Persist each completed node update while the graph is running."""
+
+    if cancellation_check is not None:
+        cancellation_check()
 
     state = get_latest_graph_state(graph, config)
     if not state and isinstance(graph_input, dict):
@@ -342,6 +350,8 @@ def stream_graph_updates(
                 state.update(node_update)
         if state:
             persist_session_state(session_id, state)
+        if cancellation_check is not None:
+            cancellation_check()
 
     return get_latest_graph_state(graph, config, fallback=state)
 
@@ -453,7 +463,11 @@ def execute_research(
     session_id: UUID,
     initial_state: dict[str, Any] | None = None,
     resume_decision: dict[str, Any] | None = None,
-) -> None:
+    *,
+    raise_errors: bool = False,
+    manage_session_status: bool = True,
+    cancellation_check: Callable[[], None] | None = None,
+) -> str:
     """
     Execute or resume a research session.
 
@@ -465,34 +479,23 @@ def execute_research(
     config = get_graph_config(session_id)
 
     try:
-        update_session_status(
-            session_id,
-            "running",
-        )
+        if manage_session_status:
+            update_session_status(session_id, "running")
+
+        if cancellation_check is not None:
+            cancellation_check()
 
         with get_checkpointer() as checkpointer:
             graph = build_research_graph(
                 checkpointer=checkpointer,
             )
+            snapshot = graph.get_state(config)
+            pending_reviews = get_checkpoint_interrupts(
+                graph,
+                config,
+            )
 
-            if resume_decision is not None:
-                snapshot = graph.get_state(config)
-
-                if not snapshot.tasks:
-                    raise ValueError(
-                        "No resumable graph checkpoint exists."
-                    )
-
-                pending_reviews = get_checkpoint_interrupts(
-                    graph,
-                    config,
-                )
-
-                if not pending_reviews:
-                    raise ValueError(
-                        "The session has no pending review."
-                    )
-
+            if resume_decision is not None and pending_reviews:
                 if len(pending_reviews) != 1:
                     raise ValueError(
                         "Expected exactly one pending review."
@@ -508,6 +511,29 @@ def execute_research(
                     Command(resume=decision),
                     config,
                     session_id,
+                    cancellation_check,
+                )
+
+            elif snapshot.next:
+                # A worker may have died after LangGraph committed the
+                # previous node. Continue from that checkpoint, not from
+                # the original input, to avoid replaying completed nodes.
+                result = stream_graph_updates(
+                    graph,
+                    None,
+                    config,
+                    session_id,
+                    cancellation_check,
+                )
+
+            elif snapshot.values:
+                # The graph may have finished before the previous worker
+                # could mark the durable job complete.
+                result = snapshot.values
+
+            elif resume_decision is not None:
+                raise ValueError(
+                    "The session has no resumable graph checkpoint."
                 )
 
             else:
@@ -547,9 +573,13 @@ def execute_research(
                     initial_state,
                     config,
                     session_id,
+                    cancellation_check,
                 )
 
             while True:
+                if cancellation_check is not None:
+                    cancellation_check()
+
                 state = get_latest_graph_state(
                     graph=graph,
                     config=config,
@@ -574,18 +604,19 @@ def execute_research(
                             "are not supported."
                         )
 
-                    update_session_status(
-                        session_id,
-                        "waiting_for_review",
-                    )
-
                     logger.info(
                         "Research session %s is waiting for review: %s",
                         session_id,
                         interrupts[0].get("type", "unknown"),
                     )
 
-                    return
+                    if manage_session_status:
+                        update_session_status(
+                            session_id,
+                            "waiting_for_review",
+                        )
+
+                    return "awaiting_review"
 
                 # No pending review: inspect the graph's tasks.
                 snapshot = graph.get_state(config)
@@ -598,22 +629,25 @@ def execute_research(
                         None,
                         config,
                         session_id,
+                        cancellation_check,
                     )
                     continue
 
                 break
 
-        update_session_status(
-            session_id,
-            "completed",
-        )
+        if manage_session_status:
+            update_session_status(session_id, "completed")
 
         logger.info(
             "Research session %s completed.",
             session_id,
         )
+        return "completed"
 
     except Exception as exc:
+        if raise_errors:
+            raise
+
         logger.exception(
             "Research session %s failed.",
             session_id,
@@ -630,6 +664,8 @@ def execute_research(
                 "Could not persist failure status for session %s.",
                 session_id,
             )
+
+        return "failed"
 
 
 # ---------------------------------------------------------

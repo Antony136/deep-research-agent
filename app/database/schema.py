@@ -28,8 +28,54 @@ CREATE TABLE IF NOT EXISTS research_sessions (
                 'running',
                 'waiting_for_review',
                 'completed',
-                'failed'
+                'failed',
+                'cancelled'
             )
+        )
+);
+"""
+
+
+# ---------------------------------------------------------
+# DURABLE RESEARCH JOBS
+# ---------------------------------------------------------
+
+CREATE_RESEARCH_JOBS_TABLE = """
+CREATE TABLE IF NOT EXISTS research_jobs (
+    id UUID PRIMARY KEY,
+    session_id UUID NOT NULL
+        REFERENCES research_sessions(id)
+        ON DELETE CASCADE,
+    payload JSONB NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'queued',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    lease_owner VARCHAR(255),
+    lease_expires_at TIMESTAMPTZ,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+
+    CONSTRAINT research_jobs_status_check
+        CHECK (
+            status IN (
+                'queued',
+                'running',
+                'retry_wait',
+                'awaiting_review',
+                'completed',
+                'failed',
+                'cancelled'
+            )
+        ),
+    CONSTRAINT research_jobs_attempts_check
+        CHECK (
+            attempt_count >= 0
+            AND max_attempts >= 1
         )
 );
 """
@@ -129,6 +175,20 @@ CREATE_INDEXES = [
     ON research_sessions (status);
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_research_jobs_available
+    ON research_jobs (available_at, created_at)
+    WHERE status IN ('queued', 'retry_wait');
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_research_jobs_expired_lease
+    ON research_jobs (lease_expires_at)
+    WHERE status = 'running';
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_research_jobs_session_created
+    ON research_jobs (session_id, created_at DESC, id DESC);
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_research_questions_session
     ON research_questions (session_id, question_number);
     """,
@@ -155,8 +215,8 @@ def initialize_database() -> None:
     """
     Create research tables, observability storage, and indexes.
 
-    Also migrate the existing session-status constraint so
-    paused human-review sessions can be stored.
+    Also migrate the existing session-status constraint and
+    create durable job storage.
     """
 
     with get_connection() as connection:
@@ -182,8 +242,23 @@ def initialize_database() -> None:
                         'running',
                         'waiting_for_review',
                         'completed',
-                        'failed'
+                        'failed',
+                        'cancelled'
                     )
+                );
+                """
+            )
+
+            cursor.execute(CREATE_RESEARCH_JOBS_TABLE)
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_research_jobs_one_active_session
+                ON research_jobs (session_id)
+                WHERE status IN (
+                    'queued',
+                    'running',
+                    'retry_wait'
                 );
                 """
             )

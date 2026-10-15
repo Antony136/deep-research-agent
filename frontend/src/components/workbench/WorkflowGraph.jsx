@@ -115,7 +115,12 @@ export function WorkflowGraph({ session, events = [], pendingReview = null }) {
     () => Object.fromEntries(GRAPH_NODES.map((node) => [node.id, node])),
     [],
   );
-  const activeNode = getActiveNode(events, session?.status, pendingReview);
+  const activeNode = getActiveNode(
+    events,
+    session?.status,
+    pendingReview,
+    session?.job?.status,
+  );
   const isDark = resolvedTheme === 'dark';
 
   const fitGraph = useCallback(() => {
