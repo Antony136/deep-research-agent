@@ -240,6 +240,15 @@ class ObservabilityEventsListResponse(BaseModel):
     events: list[ObservabilityEventResponse]
 
 
+class ResearchWorkbenchRefreshResponse(BaseModel):
+    """Session, node events, and review state for one workbench refresh."""
+
+    session: ResearchSessionResponse
+    events: list[ObservabilityEventResponse] = Field(default_factory=list)
+    events_error: str | None = None
+    pending_review: dict[str, Any] | None = None
+
+
 class SessionDeletedResponse(BaseModel):
     """Response returned when a session is deleted."""
 

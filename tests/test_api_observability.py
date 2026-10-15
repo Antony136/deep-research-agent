@@ -1,9 +1,92 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from app import api_main
+from app.api import routes
 from app.observability import tracing
+
+
+def test_workbench_refresh_returns_session_events_and_pending_review(
+    monkeypatch,
+):
+    session_id = uuid4()
+    session = {
+        "id": str(session_id),
+        "question": "What is the research question?",
+        "status": "waiting_for_review",
+    }
+    review = {"value": {"action": "approve"}}
+    events = [
+        {
+            "id": 1,
+            "session_id": str(session_id),
+            "event_type": "node_started",
+            "log_level": "INFO",
+            "message": "Node started.",
+            "created_at": datetime.now(timezone.utc),
+        }
+    ]
+    event_requests = []
+    review_requests = []
+    monkeypatch.setattr(
+        routes,
+        "get_research_session",
+        lambda requested_id: session if requested_id == session_id else None,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_observability_events",
+        lambda **kwargs: event_requests.append(kwargs) or events,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_pending_review",
+        lambda requested_id: review_requests.append(requested_id) or review,
+    )
+
+    response = routes.get_research_workbench_refresh(session_id)
+
+    assert response.session.id == str(session_id)
+    assert [event.id for event in response.events] == [1]
+    assert response.pending_review == review
+    assert response.events_error is None
+    assert event_requests == [{"session_id": session_id, "limit": 150}]
+    assert review_requests == [session_id]
+
+
+def test_workbench_refresh_surfaces_node_event_failure(monkeypatch):
+    session_id = uuid4()
+    session = {
+        "id": str(session_id),
+        "question": "What is the research question?",
+        "status": "running",
+    }
+    review_requests = []
+    monkeypatch.setattr(
+        routes,
+        "get_research_session",
+        lambda _requested_id: session,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_observability_events",
+        lambda **_kwargs: (_ for _ in ()).throw(ConnectionError("database unavailable")),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_pending_review",
+        lambda requested_id: review_requests.append(requested_id),
+    )
+
+    response = routes.get_research_workbench_refresh(session_id)
+
+    assert response.session.id == str(session_id)
+    assert response.events == []
+    assert response.events_error == "Could not retrieve node events."
+    assert response.pending_review is None
+    assert review_requests == []
 
 
 def test_api_lifespan_configures_node_event_persistence(monkeypatch):

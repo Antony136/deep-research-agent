@@ -41,7 +41,7 @@ export function ObservabilityHub({ onSelectSession }) {
 
   useEffect(() => {
     loadObservabilityData();
-    const interval = setInterval(loadObservabilityData, 15000);
+    const interval = setInterval(loadObservabilityData, 30000);
     return () => clearInterval(interval);
   }, [loadObservabilityData]);
 

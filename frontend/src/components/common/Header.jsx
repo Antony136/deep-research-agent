@@ -46,7 +46,7 @@ export function Header({
 
   useEffect(() => {
     checkHealth();
-    const interval = setInterval(checkHealth, 30000);
+    const interval = setInterval(checkHealth, 60000);
     return () => clearInterval(interval);
   }, [checkHealth]);
 

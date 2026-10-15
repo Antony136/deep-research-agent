@@ -2,13 +2,11 @@ import { useState } from 'react';
 import {
   ChevronDown,
   ChevronUp,
-  RefreshCw,
   Terminal,
 } from 'lucide-react';
-import { Button } from '../common/Button';
 import { EmptyState } from '../common/EmptyState';
 
-export function SessionEventsLog({ events = [], error, loading, onRefresh }) {
+export function SessionEventsLog({ events = [], error, loading }) {
   const [expandedId, setExpandedId] = useState(null);
   const [levelFilter, setLevelFilter] = useState('all');
 
@@ -63,35 +61,21 @@ export function SessionEventsLog({ events = [], error, loading, onRefresh }) {
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* Level Filter */}
-          <div className="flex items-center gap-1">
-            {['all', 'INFO', 'WARNING', 'ERROR'].map((lvl) => (
-              <button
-                key={lvl}
-                type="button"
-                onClick={() => setLevelFilter(lvl)}
-                className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
-                  levelFilter === lvl
-                    ? 'bg-indigo-600 text-white dark:bg-indigo-500'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
-                }`}
-              >
-                {lvl}
-              </button>
-            ))}
-          </div>
-
-          <Button
-            size="sm"
-            variant="outline"
-            icon={RefreshCw}
-            isLoading={loading}
-            onClick={onRefresh}
-            title="Refresh events"
-          >
-            Refresh
-          </Button>
+        <div className="flex items-center gap-1">
+          {['all', 'INFO', 'WARNING', 'ERROR'].map((lvl) => (
+            <button
+              key={lvl}
+              type="button"
+              onClick={() => setLevelFilter(lvl)}
+              className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
+                levelFilter === lvl
+                  ? 'bg-indigo-600 text-white dark:bg-indigo-500'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              {lvl}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -99,7 +83,7 @@ export function SessionEventsLog({ events = [], error, loading, onRefresh }) {
       <div className="space-y-2 font-mono text-xs">
         {filteredEvents.length === 0 && !loading ? (
           <p className="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center font-sans text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
-            {error ? 'Node logs are unavailable. Refresh to try again.' : 'No events match this filter.'}
+            {error ? 'Node logs are unavailable. Use Refresh now above to try again.' : 'No events match this filter.'}
           </p>
         ) : filteredEvents.map((evt) => {
           const isExpanded = expandedId === evt.id;

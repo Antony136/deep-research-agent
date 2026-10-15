@@ -90,6 +90,13 @@ export const api = {
   },
 
   /**
+   * Fetch session, node events, and review state in one workbench request.
+   */
+  async getWorkbenchRefresh(sessionId) {
+    return request(`/api/research/${encodeURIComponent(sessionId)}/workbench`);
+  },
+
+  /**
    * Create a new research session.
    */
   async createSession({

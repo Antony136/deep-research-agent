@@ -20,6 +20,7 @@ from app.schemas.api import (
     ResearchSessionListResponse,
     ResearchSessionResponse,
     ResearchSessionSummary,
+    ResearchWorkbenchRefreshResponse,
     ReviewDecisionRequest,
     ReviewSubmissionResponse,
     SessionDeletedResponse,
@@ -30,6 +31,7 @@ from app.database.repository import (
     create_session_with_job,
     enqueue_retry_job,
     enqueue_review_job,
+    get_observability_events,
     pause_latest_job,
     resume_paused_job,
 )
@@ -184,6 +186,64 @@ def get_research_session_endpoint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not retrieve the research session.",
+        ) from exc
+
+
+@router.get(
+    "/research/{session_id}/workbench",
+    response_model=ResearchWorkbenchRefreshResponse,
+)
+def get_research_workbench_refresh(
+    session_id: UUID,
+) -> ResearchWorkbenchRefreshResponse:
+    """Retrieve all data needed for one workbench refresh cycle."""
+
+    try:
+        session = get_research_session(session_id)
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Research session not found.",
+            )
+
+        events = []
+        events_error = None
+        try:
+            events = get_observability_events(
+                session_id=session_id,
+                limit=150,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to retrieve node events for session %s.",
+                session_id,
+            )
+            events_error = "Could not retrieve node events."
+
+        pending_review = (
+            get_pending_review(session_id)
+            if session["status"] == "waiting_for_review"
+            else None
+        )
+
+        return ResearchWorkbenchRefreshResponse(
+            session=ResearchSessionResponse(**session),
+            events=events,
+            events_error=events_error,
+            pending_review=pending_review,
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to refresh workbench data for session %s.",
+            session_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not refresh research workbench data.",
         ) from exc
 
 

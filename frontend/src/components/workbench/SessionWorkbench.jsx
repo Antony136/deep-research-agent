@@ -14,7 +14,6 @@ import {
   Code2,
   Copy,
   Check,
-  Radio,
   StopCircle,
   Pause,
   Play,
@@ -30,6 +29,12 @@ import { QuestionsList } from './QuestionsList';
 import { SessionEventsLog } from './SessionEventsLog';
 import { useToast } from '../../context/ToastContext';
 import { api } from '../../api/client';
+
+const SESSION_POLL_INTERVALS = [
+  { value: 15, label: '15 seconds' },
+  { value: 30, label: '30 seconds' },
+  { value: 60, label: '60 seconds' },
+];
 
 export function SessionWorkbench({
   sessionId,
@@ -49,65 +54,89 @@ export function SessionWorkbench({
   const [pausing, setPausing] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [activeTab, setActiveTab] = useState('report');
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [pollIntervalSeconds, setPollIntervalSeconds] = useState(15);
+  const refreshPromiseRef = useRef(null);
   const [copiedId, setCopiedId] = useState(false);
   const [selectedEvidenceNum, setSelectedEvidenceNum] = useState(null);
 
   // Fetch Session Data
-  const loadSessionData = useCallback(async (isPolling = false) => {
+  const loadSessionData = useCallback((isPolling = false) => {
     if (!sessionId) return;
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
     if (!isPolling) setRefreshing(true);
 
-    try {
-      const sessionData = await api.getSession(sessionId);
-      setSession(sessionData);
-
-      // Check for pending review if session is waiting_for_review
-      if (sessionData.status === 'waiting_for_review') {
-        const reviewData = await api.getPendingReview(sessionId);
-        setPendingReview(reviewData?.review || null);
-      } else {
-        setPendingReview(null);
-      }
-
-      // Load observability events
+    refreshPromiseRef.current = (async () => {
       try {
-        const eventsData = await api.getSessionEvents(sessionId);
-        setEvents(eventsData.events || []);
-        setEventsError(null);
-        eventsErrorNotified.current = false;
-      } catch (err) {
-        setEventsError(err.message || 'Could not retrieve node events.');
-        if (!eventsErrorNotified.current) {
-          toast.error(err.message || 'Could not retrieve node events.');
-          eventsErrorNotified.current = true;
+        const refreshData = await api.getWorkbenchRefresh(sessionId);
+        const sessionData = refreshData.session;
+        setSession(sessionData);
+
+        if (sessionData.status !== 'waiting_for_review') {
+          setPendingReview(null);
+        } else if (refreshData.pending_review) {
+          setPendingReview(refreshData.pending_review);
         }
+
+        if (!refreshData.events_error) {
+          setEvents(refreshData.events || []);
+          setEventsError(null);
+          eventsErrorNotified.current = false;
+        } else {
+          setEventsError(refreshData.events_error);
+          if (!eventsErrorNotified.current) {
+            toast.error(refreshData.events_error);
+            eventsErrorNotified.current = true;
+          }
+        }
+      } catch (err) {
+        if (!isPolling) {
+          toast.error(err.message || 'Failed to load session details');
+        }
+      } finally {
+        setLoading(false);
+        if (!isPolling) setRefreshing(false);
+        refreshPromiseRef.current = null;
       }
-    } catch (err) {
-      if (!isPolling) {
-        toast.error(err.message || 'Failed to load session details');
-      }
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+    })();
+
+    return refreshPromiseRef.current;
   }, [sessionId, toast]);
 
   useEffect(() => {
     loadSessionData();
   }, [loadSessionData]);
 
-  // Polling loop when running or waiting for review
+  // Poll only while the session can still make progress.
   useEffect(() => {
-    if (!autoRefresh) return;
+    if (!pollIntervalSeconds) return;
     if (!['created', 'running', 'waiting_for_review'].includes(session?.status)) return;
 
-    const interval = setInterval(() => {
-      loadSessionData(true);
-    }, 2000);
+    let timeout;
+    let disposed = false;
+    const scheduleNextPoll = () => {
+      if (disposed || document.visibilityState !== 'visible') return;
+      timeout = setTimeout(async () => {
+        await loadSessionData(true);
+        scheduleNextPoll();
+      }, pollIntervalSeconds * 1000);
+    };
+    const handleVisibilityChange = () => {
+      clearTimeout(timeout);
+      if (document.visibilityState === 'visible') {
+        loadSessionData(true);
+        scheduleNextPoll();
+      }
+    };
 
-    return () => clearInterval(interval);
-  }, [autoRefresh, session?.status, loadSessionData]);
+    scheduleNextPoll();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      disposed = true;
+      clearTimeout(timeout);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [pollIntervalSeconds, session?.status, loadSessionData]);
 
   const handleCopyId = async () => {
     try {
@@ -125,7 +154,7 @@ export function SessionWorkbench({
     try {
       await api.retrySession(sessionId);
       toast.success('Session retry scheduled', 'Resumed');
-      loadSessionData();
+      await loadSessionData(false);
     } catch (err) {
       toast.error(err.message || 'Retry failed');
     } finally {
@@ -138,7 +167,7 @@ export function SessionWorkbench({
     try {
       const result = await api.cancelSession(sessionId);
       toast.success(result.message || 'Cancellation requested');
-      await loadSessionData(true);
+      await loadSessionData(false);
     } catch (err) {
       toast.error(err.message || 'Cancellation failed');
     } finally {
@@ -151,7 +180,7 @@ export function SessionWorkbench({
     try {
       const result = await api.pauseSession(sessionId);
       toast.success(result.message || 'Pause requested');
-      await loadSessionData(true);
+      await loadSessionData(false);
     } catch (err) {
       toast.error(err.message || 'Pause failed');
     } finally {
@@ -164,7 +193,7 @@ export function SessionWorkbench({
     try {
       const result = await api.resumeSession(sessionId);
       toast.success(result.message || 'Research resumed');
-      await loadSessionData(true);
+      await loadSessionData(false);
     } catch (err) {
       toast.error(err.message || 'Resume failed');
     } finally {
@@ -235,22 +264,22 @@ export function SessionWorkbench({
         </button>
 
         <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto">
-          {/* Auto-refresh toggle */}
-          {(['created', 'running', 'waiting_for_review'].includes(session.status)) && (
-            <button
-              type="button"
-              onClick={() => setAutoRefresh(!autoRefresh)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
-                autoRefresh
-                  ? 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/60 dark:text-sky-300 dark:border-sky-800'
-                  : 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'
-              }`}
-              title="Toggle automatic state polling"
+          <label className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+            <span>Auto-refresh</span>
+            <select
+              aria-label="Session auto-refresh interval"
+              value={pollIntervalSeconds}
+              onChange={(event) => setPollIntervalSeconds(Number(event.target.value))}
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
             >
-              <Radio className={`w-3 h-3 ${autoRefresh ? 'text-sky-500 animate-pulse' : 'text-slate-400'}`} />
-              <span>{autoRefresh ? 'Live Sync' : 'Sync Paused'}</span>
-            </button>
-          )}
+              {SESSION_POLL_INTERVALS.map((interval) => (
+                <option key={interval.value} value={interval.value}>
+                  {interval.label}
+                </option>
+              ))}
+              <option value={0}>Off</option>
+            </select>
+          </label>
 
           <Button
             size="sm"
@@ -258,9 +287,9 @@ export function SessionWorkbench({
             icon={RefreshCw}
             isLoading={refreshing}
             onClick={() => loadSessionData(false)}
-            title="Refresh session data"
+            title="Refresh session data and node logs now"
           >
-            Refresh
+            Refresh now
           </Button>
 
           {activeJob && (
@@ -498,7 +527,6 @@ export function SessionWorkbench({
               events={events}
               error={eventsError}
               loading={refreshing}
-              onRefresh={() => loadSessionData(false)}
             />
           )}
 
