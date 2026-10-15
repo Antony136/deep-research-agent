@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS research_sessions (
                 'waiting_for_review',
                 'completed',
                 'failed',
-                'cancelled'
+                'cancelled',
+                'paused'
             )
         )
 );
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS research_jobs (
     lease_owner VARCHAR(255),
     lease_expires_at TIMESTAMPTZ,
     cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    pause_requested BOOLEAN NOT NULL DEFAULT FALSE,
     last_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -69,7 +71,8 @@ CREATE TABLE IF NOT EXISTS research_jobs (
                 'awaiting_review',
                 'completed',
                 'failed',
-                'cancelled'
+                'cancelled',
+                'paused'
             )
         ),
     CONSTRAINT research_jobs_attempts_check
@@ -243,7 +246,8 @@ def initialize_database() -> None:
                         'waiting_for_review',
                         'completed',
                         'failed',
-                        'cancelled'
+                        'cancelled',
+                        'paused'
                     )
                 );
                 """
@@ -252,13 +256,50 @@ def initialize_database() -> None:
             cursor.execute(CREATE_RESEARCH_JOBS_TABLE)
             cursor.execute(
                 """
+                ALTER TABLE research_jobs
+                ADD COLUMN IF NOT EXISTS pause_requested
+                    BOOLEAN NOT NULL DEFAULT FALSE;
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE research_jobs
+                DROP CONSTRAINT IF EXISTS research_jobs_status_check;
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE research_jobs
+                ADD CONSTRAINT research_jobs_status_check
+                CHECK (
+                    status IN (
+                        'queued',
+                        'running',
+                        'retry_wait',
+                        'awaiting_review',
+                        'completed',
+                        'failed',
+                        'cancelled',
+                        'paused'
+                    )
+                );
+                """
+            )
+            cursor.execute(
+                """
+                DROP INDEX IF EXISTS idx_research_jobs_one_active_session;
+                """
+            )
+            cursor.execute(
+                """
                 CREATE UNIQUE INDEX IF NOT EXISTS
                     idx_research_jobs_one_active_session
                 ON research_jobs (session_id)
                 WHERE status IN (
                     'queued',
                     'running',
-                    'retry_wait'
+                    'retry_wait',
+                    'paused'
                 );
                 """
             )

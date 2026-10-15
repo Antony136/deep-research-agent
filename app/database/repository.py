@@ -19,6 +19,7 @@ RESEARCH_JOB_COLUMNS = """
     attempt_count,
     max_attempts,
     cancel_requested,
+    pause_requested,
     last_error,
     created_at,
     updated_at,
@@ -38,11 +39,12 @@ def _job_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "attempt_count": row[4],
         "max_attempts": row[5],
         "cancel_requested": row[6],
-        "last_error": row[7],
-        "created_at": row[8],
-        "updated_at": row[9],
-        "started_at": row[10],
-        "completed_at": row[11],
+        "pause_requested": row[7],
+        "last_error": row[8],
+        "created_at": row[9],
+        "updated_at": row[10],
+        "started_at": row[11],
+        "completed_at": row[12],
     }
 
 
@@ -171,7 +173,8 @@ def enqueue_review_job(
                 VALUES (%s, %s, %s, %s)
                 RETURNING
                     id, session_id, payload, status, attempt_count,
-                    max_attempts, cancel_requested, last_error,
+                    max_attempts, cancel_requested, pause_requested,
+                    last_error,
                     created_at, updated_at, started_at, completed_at
                 """,
                 (job_id, session_id, Jsonb(payload), max_attempts),
@@ -269,7 +272,8 @@ def enqueue_retry_job(
                 VALUES (%s, %s, %s, %s)
                 RETURNING
                     id, session_id, payload, status, attempt_count,
-                    max_attempts, cancel_requested, last_error,
+                    max_attempts, cancel_requested, pause_requested,
+                    last_error,
                     created_at, updated_at, started_at, completed_at
                 """,
                 (job_id, session_id, Jsonb(payload), max_attempts),
@@ -341,10 +345,16 @@ def claim_next_job(
                 UPDATE research_jobs
                 SET status = CASE
                         WHEN cancel_requested THEN 'cancelled'
+                        WHEN pause_requested THEN 'paused'
                         ELSE 'failed'
                     END,
+                    attempt_count = CASE
+                        WHEN pause_requested AND NOT cancel_requested
+                            THEN GREATEST(attempt_count - 1, 0)
+                        ELSE attempt_count
+                    END,
                     last_error = CASE
-                        WHEN cancel_requested THEN last_error
+                        WHEN cancel_requested OR pause_requested THEN NULL
                         ELSE COALESCE(
                             last_error,
                             'Worker lease expired after the final allowed attempt.'
@@ -352,11 +362,19 @@ def claim_next_job(
                     END,
                     lease_owner = NULL,
                     lease_expires_at = NULL,
+                    pause_requested = FALSE,
                     updated_at = NOW(),
-                    completed_at = NOW()
+                    completed_at = CASE
+                        WHEN pause_requested AND NOT cancel_requested THEN NULL
+                        ELSE NOW()
+                    END
                 WHERE status = 'running'
                     AND lease_expires_at <= NOW()
-                    AND attempt_count >= max_attempts
+                    AND (
+                        attempt_count >= max_attempts
+                        OR cancel_requested
+                        OR pause_requested
+                    )
                 RETURNING session_id, status, last_error
                 """
             )
@@ -365,18 +383,19 @@ def claim_next_job(
                     """
                     UPDATE research_sessions
                     SET status = %s,
-                        error_message = CASE
-                            WHEN %s = 'failed' THEN %s
-                            ELSE NULL
-                        END,
+                        error_message = CASE WHEN %s = 'failed' THEN %s ELSE NULL END,
                         updated_at = NOW(),
-                        completed_at = NOW()
+                        completed_at = CASE
+                            WHEN %s = 'paused' THEN NULL
+                            ELSE NOW()
+                        END
                     WHERE id = %s
                     """,
                     (
                         job_status,
                         job_status,
                         error_message,
+                        job_status,
                         session_id,
                     ),
                 )
@@ -411,12 +430,14 @@ def claim_next_job(
                     lease_owner = %s,
                     lease_expires_at = NOW() + make_interval(secs => %s),
                     cancel_requested = FALSE,
+                    pause_requested = FALSE,
                     updated_at = NOW(),
                     started_at = COALESCE(started_at, NOW())
                 WHERE id = %s
                 RETURNING
                     id, session_id, payload, status, attempt_count,
-                    max_attempts, cancel_requested, last_error,
+                    max_attempts, cancel_requested, pause_requested,
+                    last_error,
                     created_at, updated_at, started_at, completed_at
                 """,
                 (worker_id, lease_seconds, row[0]),
@@ -495,7 +516,7 @@ def release_job_for_recovery(job_id: UUID, worker_id: str) -> str | None:
 
             cursor.execute(
                 """
-                SELECT cancel_requested
+                SELECT cancel_requested, pause_requested
                 FROM research_jobs
                 WHERE id = %s
                     AND status = 'running'
@@ -508,12 +529,22 @@ def release_job_for_recovery(job_id: UUID, worker_id: str) -> str | None:
             if row is None:
                 return None
 
-            outcome = "cancelled" if row[0] else "queued"
+            if row[0]:
+                outcome = "cancelled"
+            elif row[1]:
+                outcome = "paused"
+            else:
+                outcome = "queued"
             cursor.execute(
                 """
                 UPDATE research_jobs
                 SET status = %s,
                     attempt_count = GREATEST(attempt_count - 1, 0),
+                    pause_requested = FALSE,
+                    last_error = CASE
+                        WHEN %s IN ('paused', 'cancelled') THEN NULL
+                        ELSE last_error
+                    END,
                     available_at = NOW(),
                     lease_owner = NULL,
                     lease_expires_at = NULL,
@@ -526,32 +557,39 @@ def release_job_for_recovery(job_id: UUID, worker_id: str) -> str | None:
                     AND status = 'running'
                     AND lease_owner = %s
                 """,
-                (outcome, outcome, job_id, worker_id),
+                (outcome, outcome, outcome, job_id, worker_id),
             )
-            if outcome == "cancelled":
+            if outcome in {"cancelled", "paused"}:
+                session_status = outcome
                 cursor.execute(
                     """
                     UPDATE research_sessions
-                    SET status = 'cancelled',
+                    SET status = %s,
                         error_message = NULL,
                         updated_at = NOW(),
-                        completed_at = NOW()
+                        completed_at = CASE
+                            WHEN %s = 'cancelled' THEN NOW()
+                            ELSE NULL
+                        END
                     WHERE id = %s
                     """,
-                    (session_id,),
+                    (session_status, session_status, session_id),
                 )
 
     return outcome
 
 
-def get_job_control(job_id: UUID, worker_id: str) -> bool | None:
-    """Return cancellation state, or None when this worker lost its lease."""
+def get_job_control(
+    job_id: UUID,
+    worker_id: str,
+) -> dict[str, bool] | None:
+    """Return job control flags, or None when this worker lost its lease."""
 
     with get_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT cancel_requested
+                SELECT cancel_requested, pause_requested
                 FROM research_jobs
                 WHERE id = %s
                     AND status = 'running'
@@ -561,7 +599,302 @@ def get_job_control(job_id: UUID, worker_id: str) -> bool | None:
             )
             row = cursor.fetchone()
 
-    return row[0] if row else None
+    if row is None:
+        return None
+
+    return {
+        "cancel_requested": row[0],
+        "pause_requested": row[1],
+    }
+
+
+def pause_running_job(job_id: UUID, worker_id: str) -> str | None:
+    """Pause a running job at its latest committed graph checkpoint."""
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT session_id
+                FROM research_jobs
+                WHERE id = %s
+                    AND status = 'running'
+                    AND lease_owner = %s
+                FOR UPDATE
+                """,
+                (job_id, worker_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            session_id = row[0]
+            cursor.execute(
+                """
+                SELECT id
+                FROM research_sessions
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (session_id,),
+            )
+            if cursor.fetchone() is None:
+                return None
+
+            cursor.execute(
+                """
+                SELECT cancel_requested, pause_requested
+                FROM research_jobs
+                WHERE id = %s
+                    AND status = 'running'
+                    AND lease_owner = %s
+                FOR UPDATE
+                """,
+                (job_id, worker_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            if row[0]:
+                outcome = "cancelled"
+            elif row[1]:
+                outcome = "paused"
+            else:
+                return None
+
+            cursor.execute(
+                """
+                UPDATE research_jobs
+                SET status = %s,
+                    attempt_count = CASE
+                        WHEN %s = 'paused'
+                            THEN GREATEST(attempt_count - 1, 0)
+                        ELSE attempt_count
+                    END,
+                    pause_requested = FALSE,
+                    last_error = NULL,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = NOW(),
+                    completed_at = CASE
+                        WHEN %s = 'cancelled' THEN NOW()
+                        ELSE NULL
+                    END
+                WHERE id = %s
+                    AND status = 'running'
+                    AND lease_owner = %s
+                """,
+                (outcome, outcome, outcome, job_id, worker_id),
+            )
+            cursor.execute(
+                """
+                UPDATE research_sessions
+                SET status = %s,
+                    error_message = NULL,
+                    updated_at = NOW(),
+                    completed_at = CASE
+                        WHEN %s = 'cancelled' THEN NOW()
+                        ELSE NULL
+                    END
+                WHERE id = %s
+                """,
+                (outcome, outcome, session_id),
+            )
+
+    return outcome
+
+
+def pause_latest_job(session_id: UUID) -> dict[str, Any]:
+    """Pause queued work immediately or request a worker checkpoint pause."""
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT {RESEARCH_JOB_COLUMNS}
+                FROM research_jobs
+                WHERE session_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    "SELECT id FROM research_sessions WHERE id = %s",
+                    (session_id,),
+                )
+                if cursor.fetchone() is None:
+                    raise ValueError(f"Research session not found: {session_id}")
+                raise ValueError("The session has no research job to pause.")
+
+            cursor.execute(
+                """
+                SELECT id
+                FROM research_sessions
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (session_id,),
+            )
+            if cursor.fetchone() is None:
+                raise ValueError(f"Research session not found: {session_id}")
+
+            cursor.execute(
+                f"""
+                SELECT {RESEARCH_JOB_COLUMNS}
+                FROM research_jobs
+                WHERE session_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("The session has no research job to pause.")
+
+            job = _job_from_row(row)
+            if job["status"] == "running":
+                if job["cancel_requested"]:
+                    raise ValueError("Cancellation has already been requested.")
+                if not job["pause_requested"]:
+                    cursor.execute(
+                        """
+                        UPDATE research_jobs
+                        SET pause_requested = TRUE,
+                            updated_at = NOW()
+                        WHERE id = %s
+                            AND status = 'running'
+                            AND cancel_requested = FALSE
+                        """,
+                        (UUID(job["id"]),),
+                    )
+                    job["pause_requested"] = True
+            elif job["status"] in {"queued", "retry_wait"}:
+                cursor.execute(
+                    """
+                    UPDATE research_jobs
+                    SET status = 'paused',
+                        pause_requested = FALSE,
+                        updated_at = NOW(),
+                        completed_at = NULL
+                    WHERE id = %s
+                    """,
+                    (UUID(job["id"]),),
+                )
+                cursor.execute(
+                    """
+                    UPDATE research_sessions
+                    SET status = 'paused',
+                        error_message = NULL,
+                        updated_at = NOW(),
+                        completed_at = NULL
+                    WHERE id = %s
+                    """,
+                    (session_id,),
+                )
+                job["status"] = "paused"
+                job["pause_requested"] = False
+            elif job["status"] == "paused":
+                return job
+            else:
+                raise ValueError(
+                    f"Cannot pause a job with status {job['status']}."
+                )
+
+    return job
+
+
+def resume_paused_job(session_id: UUID) -> dict[str, Any]:
+    """Queue a paused job to resume from its latest graph checkpoint."""
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT {RESEARCH_JOB_COLUMNS}
+                FROM research_jobs
+                WHERE session_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    "SELECT id FROM research_sessions WHERE id = %s",
+                    (session_id,),
+                )
+                if cursor.fetchone() is None:
+                    raise ValueError(f"Research session not found: {session_id}")
+                raise ValueError("The latest research job is not paused.")
+
+            cursor.execute(
+                """
+                SELECT status
+                FROM research_sessions
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (session_id,),
+            )
+            session_row = cursor.fetchone()
+            if session_row is None:
+                raise ValueError(f"Research session not found: {session_id}")
+
+            cursor.execute(
+                f"""
+                SELECT {RESEARCH_JOB_COLUMNS}
+                FROM research_jobs
+                WHERE session_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row is None or row[3] != "paused":
+                raise ValueError("The latest research job is not paused.")
+            if session_row[0] != "paused":
+                raise ValueError("The research session is not paused.")
+
+            cursor.execute(
+                f"""
+                UPDATE research_jobs
+                SET status = 'queued',
+                    cancel_requested = FALSE,
+                    pause_requested = FALSE,
+                    last_error = NULL,
+                    available_at = NOW(),
+                    updated_at = NOW(),
+                    completed_at = NULL
+                WHERE id = %s
+                RETURNING {RESEARCH_JOB_COLUMNS}
+                """,
+                (row[0],),
+            )
+            resumed_row = cursor.fetchone()
+            cursor.execute(
+                """
+                UPDATE research_sessions
+                SET status = 'running',
+                    error_message = NULL,
+                    updated_at = NOW(),
+                    completed_at = NULL
+                WHERE id = %s
+                """,
+                (session_id,),
+            )
+
+    return _job_from_row(resumed_row)
 
 
 def complete_job(
@@ -571,14 +904,14 @@ def complete_job(
 ) -> bool:
     """Complete a job and update the session in the same transaction."""
 
-    if outcome not in {"completed", "awaiting_review", "cancelled"}:
+    if outcome not in {"completed", "awaiting_review", "cancelled", "paused"}:
         raise ValueError(f"Invalid job outcome: {outcome}")
 
     with get_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT session_id, cancel_requested
+                SELECT session_id, cancel_requested, pause_requested
                 FROM research_jobs
                 WHERE id = %s
                     AND status = 'running'
@@ -591,9 +924,11 @@ def complete_job(
             if row is None:
                 return False
 
-            session_id, cancel_requested = row
+            session_id, cancel_requested, pause_requested = row
             if cancel_requested:
                 outcome = "cancelled"
+            elif pause_requested:
+                outcome = "paused"
 
             cursor.execute(
                 """
@@ -611,11 +946,21 @@ def complete_job(
                 """
                 UPDATE research_jobs
                 SET status = %s,
+                    attempt_count = CASE
+                        WHEN %s = 'paused'
+                            THEN GREATEST(attempt_count - 1, 0)
+                        ELSE attempt_count
+                    END,
+                    pause_requested = FALSE,
+                    last_error = CASE
+                        WHEN %s IN ('cancelled', 'paused') THEN NULL
+                        ELSE last_error
+                    END,
                     lease_owner = NULL,
                     lease_expires_at = NULL,
                     updated_at = NOW(),
                     completed_at = CASE
-                        WHEN %s = 'awaiting_review' THEN NULL
+                        WHEN %s IN ('awaiting_review', 'paused') THEN NULL
                         ELSE NOW()
                     END
                 WHERE id = %s
@@ -623,7 +968,7 @@ def complete_job(
                     AND lease_owner = %s
                 RETURNING session_id
                 """,
-                (outcome, outcome, job_id, worker_id),
+                (outcome, outcome, outcome, outcome, job_id, worker_id),
             )
             completed_row = cursor.fetchone()
             if completed_row is None:
@@ -633,6 +978,7 @@ def complete_job(
                 "completed": "completed",
                 "awaiting_review": "waiting_for_review",
                 "cancelled": "cancelled",
+                "paused": "paused",
             }[outcome]
             cursor.execute(
                 """
@@ -696,7 +1042,7 @@ def fail_or_retry_job(
             cursor.execute(
                 """
                 SELECT session_id, attempt_count, max_attempts,
-                    cancel_requested
+                    cancel_requested, pause_requested
                 FROM research_jobs
                 WHERE id = %s
                     AND status = 'running'
@@ -709,9 +1055,17 @@ def fail_or_retry_job(
             if row is None:
                 return None
 
-            session_id, attempts, max_attempts, cancel_requested = row
+            (
+                session_id,
+                attempts,
+                max_attempts,
+                cancel_requested,
+                pause_requested,
+            ) = row
             if cancel_requested:
                 outcome = "cancelled"
+            elif pause_requested:
+                outcome = "paused"
             elif retryable and attempts < max_attempts:
                 outcome = "retry_wait"
             else:
@@ -721,7 +1075,16 @@ def fail_or_retry_job(
                 """
                 UPDATE research_jobs
                 SET status = %s,
-                    last_error = %s,
+                    attempt_count = CASE
+                        WHEN %s = 'paused'
+                            THEN GREATEST(attempt_count - 1, 0)
+                        ELSE attempt_count
+                    END,
+                    pause_requested = FALSE,
+                    last_error = CASE
+                        WHEN %s IN ('cancelled', 'paused') THEN NULL
+                        ELSE %s
+                    END,
                     available_at = CASE
                         WHEN %s = 'retry_wait'
                             THEN NOW() + make_interval(secs => %s)
@@ -738,6 +1101,8 @@ def fail_or_retry_job(
                 WHERE id = %s
                 """,
                 (
+                    outcome,
+                    outcome,
                     outcome,
                     normalized_error,
                     outcome,
@@ -759,17 +1124,20 @@ def fail_or_retry_job(
                     """,
                     (normalized_error, session_id),
                 )
-            elif outcome == "cancelled":
+            elif outcome in {"cancelled", "paused"}:
                 cursor.execute(
                     """
                     UPDATE research_sessions
-                    SET status = 'cancelled',
+                    SET status = %s,
                         error_message = NULL,
                         updated_at = NOW(),
-                        completed_at = NOW()
+                        completed_at = CASE
+                            WHEN %s = 'cancelled' THEN NOW()
+                            ELSE NULL
+                        END
                     WHERE id = %s
                     """,
-                    (session_id,),
+                    (outcome, outcome, session_id),
                 )
 
     return outcome
@@ -829,12 +1197,19 @@ def cancel_latest_job(session_id: UUID) -> dict[str, Any]:
                 raise ValueError("The session has no research job to cancel.")
 
             job = _job_from_row(row)
-            if job["status"] in {"queued", "retry_wait", "awaiting_review"}:
+            if job["status"] in {
+                "queued",
+                "retry_wait",
+                "awaiting_review",
+                "paused",
+            }:
                 cursor.execute(
                     """
                     UPDATE research_jobs
                     SET status = 'cancelled',
                         cancel_requested = TRUE,
+                        pause_requested = FALSE,
+                        last_error = NULL,
                         updated_at = NOW(),
                         completed_at = NOW()
                     WHERE id = %s
@@ -854,17 +1229,21 @@ def cancel_latest_job(session_id: UUID) -> dict[str, Any]:
                 )
                 job["status"] = "cancelled"
                 job["cancel_requested"] = True
+                job["pause_requested"] = False
+                job["last_error"] = None
             elif job["status"] == "running":
                 cursor.execute(
                     """
                     UPDATE research_jobs
                     SET cancel_requested = TRUE,
+                        pause_requested = FALSE,
                         updated_at = NOW()
                     WHERE id = %s
                     """,
                     (UUID(job["id"]),),
                 )
                 job["cancel_requested"] = True
+                job["pause_requested"] = False
             else:
                 raise ValueError(
                     f"Cannot cancel a job with status {job['status']}."
@@ -887,6 +1266,7 @@ def update_session_status(
         "completed",
         "failed",
         "cancelled",
+        "paused",
     }
 
     if status not in allowed_statuses:
@@ -1152,6 +1532,7 @@ def get_session(session_id: UUID) -> dict[str, Any] | None:
                     attempt_count,
                     max_attempts,
                     cancel_requested,
+                    pause_requested,
                     last_error
                 FROM research_sessions AS session
                 LEFT JOIN LATERAL (
@@ -1161,6 +1542,7 @@ def get_session(session_id: UUID) -> dict[str, Any] | None:
                         attempt_count,
                         max_attempts,
                         cancel_requested,
+                        pause_requested,
                         last_error
                     FROM research_jobs
                     WHERE session_id = session.id
@@ -1194,7 +1576,8 @@ def get_session(session_id: UUID) -> dict[str, Any] | None:
                 "attempt_count": row[11],
                 "max_attempts": row[12],
                 "cancel_requested": row[13],
-                "last_error": row[14],
+                "pause_requested": row[14],
+                "last_error": row[15],
             }
             if row[9] is not None
             else None
@@ -1223,6 +1606,7 @@ def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
                     attempt_count,
                     max_attempts,
                     cancel_requested,
+                    pause_requested,
                     last_error
                 FROM research_sessions AS session
                 LEFT JOIN LATERAL (
@@ -1232,6 +1616,7 @@ def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
                         attempt_count,
                         max_attempts,
                         cancel_requested,
+                        pause_requested,
                         last_error
                     FROM research_jobs
                     WHERE session_id = session.id
@@ -1260,7 +1645,8 @@ def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
                     "attempt_count": row[7],
                     "max_attempts": row[8],
                     "cancel_requested": row[9],
-                    "last_error": row[10],
+                    "pause_requested": row[10],
+                    "last_error": row[11],
                 }
                 if row[5] is not None
                 else None
@@ -1423,7 +1809,8 @@ def delete_session(session_id: UUID) -> bool:
                         'queued',
                         'running',
                         'retry_wait',
-                        'awaiting_review'
+                        'awaiting_review',
+                        'paused'
                     )
                 LIMIT 1
                 FOR UPDATE

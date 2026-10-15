@@ -159,6 +159,24 @@ export const api = {
   },
 
   /**
+   * Pause research at a safe workflow checkpoint.
+   */
+  async pauseSession(sessionId) {
+    return request(`/api/research/${encodeURIComponent(sessionId)}/pause`, {
+      method: 'POST',
+    });
+  },
+
+  /**
+   * Resume a paused research job from its latest checkpoint.
+   */
+  async resumeSession(sessionId) {
+    return request(`/api/research/${encodeURIComponent(sessionId)}/resume`, {
+      method: 'POST',
+    });
+  },
+
+  /**
    * Delete a research session and all cascaded data.
    */
   async deleteSession(sessionId) {

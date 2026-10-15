@@ -12,6 +12,8 @@ import {
   Activity,
   Layers,
   StopCircle,
+  Pause,
+  Play,
 } from 'lucide-react';
 import { StatusBadge } from '../common/Badge';
 import { Button } from '../common/Button';
@@ -34,6 +36,8 @@ export function SessionsList({
   const [deletingId, setDeletingId] = useState(null);
   const [retryingId, setRetryingId] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
+  const [pausingId, setPausingId] = useState(null);
+  const [resumingId, setResumingId] = useState(null);
 
   // Status Counts
   const stats = useMemo(() => {
@@ -103,6 +107,34 @@ export function SessionsList({
       toast.error(err.message || 'Failed to cancel session');
     } finally {
       setCancellingId(null);
+    }
+  };
+
+  const handlePause = async (e, sessionId) => {
+    e.stopPropagation();
+    setPausingId(sessionId);
+    try {
+      const result = await api.pauseSession(sessionId);
+      toast.success(result.message || 'Pause requested');
+      onRefresh();
+    } catch (err) {
+      toast.error(err.message || 'Failed to pause session');
+    } finally {
+      setPausingId(null);
+    }
+  };
+
+  const handleResume = async (e, sessionId) => {
+    e.stopPropagation();
+    setResumingId(sessionId);
+    try {
+      const result = await api.resumeSession(sessionId);
+      toast.success(result.message || 'Research resumed');
+      onRefresh();
+    } catch (err) {
+      toast.error(err.message || 'Failed to resume session');
+    } finally {
+      setResumingId(null);
     }
   };
 
@@ -201,6 +233,7 @@ export function SessionsList({
             { id: 'running', label: 'Running' },
             { id: 'completed', label: 'Completed' },
             { id: 'failed', label: 'Failed' },
+            { id: 'paused', label: 'Paused' },
             { id: 'cancelled', label: 'Cancelled' },
           ].map((tab) => (
             <button
@@ -256,6 +289,8 @@ export function SessionsList({
             const isWaiting = session.status === 'waiting_for_review';
             const isRunning = session.status === 'running';
             const canResumeLegacySession = isRunning && !session.job;
+            const activeJob = ['queued', 'running', 'retry_wait'].includes(session.job?.status);
+            const canCancelJob = ['queued', 'running', 'retry_wait', 'awaiting_review', 'paused'].includes(session.job?.status);
 
             return (
               <Card
@@ -295,7 +330,7 @@ export function SessionsList({
                     <h3 className="text-sm sm:text-base font-semibold text-slate-900 dark:text-slate-100 line-clamp-2 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
                       {session.question}
                     </h3>
-                    {session.job?.last_error && (
+                    {session.job?.last_error && session.job.status !== 'cancelled' && !session.job.cancel_requested && (
                       <p className="line-clamp-2 text-xs text-rose-700 dark:text-rose-300">
                         {session.job.last_error}
                       </p>
@@ -303,18 +338,45 @@ export function SessionsList({
                   </div>
 
                   {/* Actions Bar */}
-                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
-                    {['queued', 'running', 'retry_wait', 'awaiting_review'].includes(session.job?.status) && (
+                  <div className="flex flex-wrap items-center gap-2 shrink-0 self-end sm:self-center">
+                    {activeJob && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        icon={Pause}
+                        isLoading={pausingId === session.id}
+                        disabled={session.job?.pause_requested || session.job?.cancel_requested}
+                        onClick={(e) => handlePause(e, session.id)}
+                        title="Pause at the next workflow checkpoint"
+                      >
+                        {session.job?.pause_requested ? 'Pausing…' : 'Pause'}
+                      </Button>
+                    )}
+
+                    {session.job?.status === 'paused' && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        icon={Play}
+                        isLoading={resumingId === session.id}
+                        onClick={(e) => handleResume(e, session.id)}
+                        title="Resume from the saved workflow checkpoint"
+                      >
+                        Resume
+                      </Button>
+                    )}
+
+                    {canCancelJob && (
                       <Button
                         variant="danger"
                         size="sm"
                         icon={StopCircle}
                         isLoading={cancellingId === session.id}
-                        disabled={session.job?.cancel_requested}
+                        disabled={session.job?.cancel_requested && session.job?.status === 'running'}
                         onClick={(e) => handleCancel(e, session.id)}
                         title="Cancel this research job"
                       >
-                        {session.job?.cancel_requested ? 'Cancel Requested' : 'Cancel'}
+                        {session.job?.cancel_requested && session.job?.status === 'running' ? 'Cancelling…' : 'Cancel'}
                       </Button>
                     )}
 

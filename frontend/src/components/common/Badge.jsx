@@ -45,6 +45,11 @@ export function StatusBadge({ status, size = 'sm' }) {
       bg: 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700',
       dot: 'bg-slate-400',
     },
+    paused: {
+      label: 'Paused',
+      bg: 'bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-950/60 dark:text-violet-300 dark:border-violet-800',
+      dot: 'bg-violet-500',
+    },
   }[status] || {
     label: status || 'Unknown',
     bg: 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700',

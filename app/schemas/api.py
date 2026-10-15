@@ -113,10 +113,12 @@ class ResearchJobSummary(BaseModel):
         "completed",
         "failed",
         "cancelled",
+        "paused",
     ]
     attempt_count: int
     max_attempts: int
     cancel_requested: bool = False
+    pause_requested: bool = False
     last_error: str | None = None
 
 
@@ -133,6 +135,7 @@ class ResearchSessionSummary(BaseModel):
         "completed",
         "failed",
         "cancelled",
+        "paused",
     ]
 
     created_at: datetime | None = None
@@ -180,6 +183,7 @@ class ReviewSubmissionResponse(BaseModel):
         "completed",
         "failed",
         "cancelled",
+        "paused",
     ]
 
     message: str
@@ -188,6 +192,7 @@ class ReviewSubmissionResponse(BaseModel):
     attempt_count: int | None = None
     max_attempts: int | None = None
     cancel_requested: bool = False
+    pause_requested: bool = False
     last_error: str | None = None
 
 

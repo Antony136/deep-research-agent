@@ -37,7 +37,7 @@ def test_worker_persists_transient_failure_for_backoff_retry(monkeypatch):
     )
     monkeypatch.setattr(
         "app.worker.repository.get_job_control",
-        lambda *_args: False,
+        lambda *_args: {"cancel_requested": False, "pause_requested": False},
     )
     monkeypatch.setattr(
         "app.worker.repository.renew_job_lease",
@@ -64,7 +64,7 @@ def test_worker_does_not_retry_permanent_failure(monkeypatch):
     )
     monkeypatch.setattr(
         "app.worker.repository.get_job_control",
-        lambda *_args: False,
+        lambda *_args: {"cancel_requested": False, "pause_requested": False},
     )
     monkeypatch.setattr(
         "app.worker.repository.renew_job_lease",
@@ -93,7 +93,7 @@ def test_worker_shutdown_requeues_without_consuming_an_attempt(monkeypatch):
     monkeypatch.setattr("app.worker.execute_research", fake_execute)
     monkeypatch.setattr(
         "app.worker.repository.get_job_control",
-        lambda *_args: False,
+        lambda *_args: {"cancel_requested": False, "pause_requested": False},
     )
     monkeypatch.setattr(
         "app.worker.repository.renew_job_lease",
@@ -159,7 +159,7 @@ def test_worker_marks_job_cancelled_at_graph_checkpoint(monkeypatch):
     monkeypatch.setattr("app.worker.execute_research", fake_execute)
     monkeypatch.setattr(
         "app.worker.repository.get_job_control",
-        lambda *_args: True,
+        lambda *_args: {"cancel_requested": True, "pause_requested": False},
     )
     monkeypatch.setattr(
         "app.worker.repository.renew_job_lease",
@@ -175,6 +175,33 @@ def test_worker_marks_job_cancelled_at_graph_checkpoint(monkeypatch):
     assert completed[0][2] == "cancelled"
 
 
+def test_worker_pauses_job_at_graph_checkpoint(monkeypatch):
+    job = _job()
+    paused = []
+
+    def fake_execute(**kwargs):
+        kwargs["cancellation_check"]()
+        return "completed"
+
+    monkeypatch.setattr("app.worker.execute_research", fake_execute)
+    monkeypatch.setattr(
+        "app.worker.repository.get_job_control",
+        lambda *_args: {"cancel_requested": False, "pause_requested": True},
+    )
+    monkeypatch.setattr(
+        "app.worker.repository.renew_job_lease",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        "app.worker.repository.pause_running_job",
+        lambda *args: paused.append(args),
+    )
+
+    process_job(job, "worker-a", Event(), lease_seconds=300)
+
+    assert paused == [(UUID(job["id"]), "worker-a")]
+
+
 def test_worker_resumes_pending_human_review_as_a_durable_job(monkeypatch):
     decision = {"action": "approve"}
     job = _job({"resume_decision": decision})
@@ -188,7 +215,7 @@ def test_worker_resumes_pending_human_review_as_a_durable_job(monkeypatch):
     monkeypatch.setattr("app.worker.execute_research", fake_execute)
     monkeypatch.setattr(
         "app.worker.repository.get_job_control",
-        lambda *_args: False,
+        lambda *_args: {"cancel_requested": False, "pause_requested": False},
     )
     monkeypatch.setattr(
         "app.worker.repository.renew_job_lease",
@@ -265,6 +292,66 @@ def test_crash_recovery_resumes_from_latest_langgraph_checkpoint(monkeypatch):
     snapshot = graph.get_state(research_service.get_graph_config(session_id))
     assert snapshot.values["value"] == 1
     assert snapshot.values["finished"] is True
+
+
+def test_pause_checkpoint_resumes_without_replaying_completed_nodes(monkeypatch):
+    checkpointer = InMemorySaver()
+    calls = []
+
+    def first_node(state):
+        calls.append("first")
+        return {"value": state["value"] + 1}
+
+    def final_node(_state):
+        calls.append("final")
+        return {"finished": True}
+
+    builder = StateGraph(RecoveryState)
+    builder.add_node("first", first_node)
+    builder.add_node("final", final_node)
+    builder.add_edge(START, "first")
+    builder.add_edge("first", "final")
+    builder.add_edge("final", END)
+    graph = builder.compile(checkpointer=checkpointer)
+
+    @contextmanager
+    def use_checkpointer():
+        yield checkpointer
+
+    monkeypatch.setattr(research_service, "get_checkpointer", use_checkpointer)
+    monkeypatch.setattr(research_service, "build_research_graph", lambda **_kwargs: graph)
+    monkeypatch.setattr(research_service, "build_initial_state", lambda **_kwargs: {})
+    monkeypatch.setattr(research_service, "persist_session_state", lambda *_args: None)
+
+    session_id = uuid4()
+    checkpoint_checks = {"count": 0}
+
+    def pause_after_first_checkpoint():
+        checkpoint_checks["count"] += 1
+        if checkpoint_checks["count"] == 2:
+            raise RuntimeError("pause at checkpoint")
+
+    with pytest.raises(RuntimeError, match="pause at checkpoint"):
+        research_service.execute_research(
+            session_id,
+            initial_state={"value": 0, "finished": False},
+            raise_errors=True,
+            manage_session_status=False,
+            cancellation_check=pause_after_first_checkpoint,
+        )
+
+    outcome = research_service.execute_research(
+        session_id,
+        initial_state={"value": 0, "finished": False},
+        raise_errors=True,
+        manage_session_status=False,
+    )
+
+    snapshot = graph.get_state(research_service.get_graph_config(session_id))
+    assert outcome == "completed"
+    assert snapshot.values["value"] == 1
+    assert snapshot.values["finished"] is True
+    assert calls == ["first", "final"]
 
 
 class ReviewState(TypedDict):
@@ -392,6 +479,7 @@ def test_reclaim_query_uses_expired_lease_and_skip_locked(monkeypatch):
         2,
         3,
         False,
+        False,
         "previous attempt failed",
         "created",
         "updated",
@@ -460,6 +548,7 @@ def test_cancel_queued_job_marks_session_cancelled(monkeypatch):
         0,
         3,
         False,
+        False,
         None,
         "created",
         "created",
@@ -508,6 +597,182 @@ def test_cancel_queued_job_marks_session_cancelled(monkeypatch):
 
     assert result["status"] == "cancelled"
     assert result["cancel_requested"] is True
+
+
+def test_pause_queued_job_moves_job_and_session_to_paused(monkeypatch):
+    job_id = uuid4()
+    session_id = uuid4()
+    row = (
+        job_id,
+        session_id,
+        {"initial_state": {"value": 1}},
+        "queued",
+        0,
+        3,
+        False,
+        False,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    class FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, query, _params=None):
+            self.query = query
+
+        def fetchone(self):
+            if "FROM research_jobs" in self.query:
+                return row
+            return (session_id,)
+
+    cursor = FakeCursor()
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return cursor
+
+    @contextmanager
+    def fake_get_connection():
+        yield FakeConnection()
+
+    monkeypatch.setattr(repository, "get_connection", fake_get_connection)
+
+    job = repository.pause_latest_job(session_id)
+
+    assert job["status"] == "paused"
+    assert job["pause_requested"] is False
+
+
+def test_resume_paused_job_requeues_same_job_and_checkpoint(monkeypatch):
+    job_id = uuid4()
+    session_id = uuid4()
+    payload = {"resume_decision": {"action": "approve"}}
+    paused_row = (
+        job_id,
+        session_id,
+        payload,
+        "paused",
+        2,
+        3,
+        False,
+        False,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    queued_row = (*paused_row[:3], "queued", *paused_row[4:])
+
+    class FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, query, _params=None):
+            self.query = query
+
+        def fetchone(self):
+            if "UPDATE research_jobs" in self.query:
+                return queued_row
+            if "FROM research_jobs" in self.query:
+                return paused_row
+            return ("paused",)
+
+    cursor = FakeCursor()
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return cursor
+
+    @contextmanager
+    def fake_get_connection():
+        yield FakeConnection()
+
+    monkeypatch.setattr(repository, "get_connection", fake_get_connection)
+
+    job = repository.resume_paused_job(session_id)
+
+    assert job["id"] == str(job_id)
+    assert job["payload"] == payload
+    assert job["status"] == "queued"
+    assert job["attempt_count"] == 2
+
+
+def test_pause_transition_prefers_concurrent_cancellation(monkeypatch):
+    job_id = uuid4()
+    session_id = uuid4()
+    cursor = SimpleNamespace(query="", params=[], queries=[])
+
+    def execute(query, params=None):
+        cursor.query = query
+        cursor.params = params
+        cursor.queries.append(query)
+
+    def fetchone():
+        if "SELECT cancel_requested, pause_requested" in cursor.query:
+            return True, True
+        return (session_id,)
+
+    cursor.execute = execute
+    cursor.fetchone = fetchone
+
+    class FakeCursor:
+        def __enter__(self):
+            return cursor
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    @contextmanager
+    def fake_get_connection():
+        yield FakeConnection()
+
+    monkeypatch.setattr(repository, "get_connection", fake_get_connection)
+
+    outcome = repository.pause_running_job(job_id, "worker-a")
+
+    assert outcome == "cancelled"
+    assert any(
+        "SET status = %s" in query and "UPDATE research_jobs" in query
+        for query in cursor.queries
+    )
 
 
 def test_node_metrics_are_read_from_persisted_cross_process_events(monkeypatch):
@@ -564,6 +829,7 @@ def test_legacy_running_session_can_be_resumed_without_job_history(monkeypatch):
         0,
         3,
         False,
+        False,
         None,
         None,
         None,
@@ -615,18 +881,20 @@ def test_legacy_running_session_can_be_resumed_without_job_history(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("attempt_count", "cancel_requested", "retryable", "expected"),
+    ("attempt_count", "cancel_requested", "pause_requested", "retryable", "expected"),
     [
-        (1, False, True, "retry_wait"),
-        (3, False, True, "failed"),
-        (1, False, False, "failed"),
-        (1, True, True, "cancelled"),
+        (1, False, False, True, "retry_wait"),
+        (3, False, False, True, "failed"),
+        (1, False, False, False, "failed"),
+        (1, True, False, True, "cancelled"),
+        (1, False, True, True, "paused"),
     ],
 )
 def test_failure_transition_respects_attempt_limit_and_cancellation(
     monkeypatch,
     attempt_count,
     cancel_requested,
+    pause_requested,
     retryable,
     expected,
 ):
@@ -641,7 +909,13 @@ def test_failure_transition_respects_attempt_limit_and_cancellation(
     def fetchone():
         if "FROM research_jobs" in cursor.query:
             if "attempt_count" in cursor.query:
-                return session_id, attempt_count, 3, cancel_requested
+                return (
+                    session_id,
+                    attempt_count,
+                    3,
+                    cancel_requested,
+                    pause_requested,
+                )
             return (session_id,)
         return (session_id,)
 

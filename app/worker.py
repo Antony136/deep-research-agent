@@ -36,6 +36,10 @@ class WorkerStopping(Exception):
     """Raised when the process is shutting down at a safe checkpoint."""
 
 
+class ResearchPaused(Exception):
+    """Raised when a job should stop at its latest graph checkpoint."""
+
+
 def process_job(
     job: dict[str, Any],
     worker_id: str,
@@ -83,15 +87,17 @@ def process_job(
         if lease_lost.is_set():
             raise JobLeaseLost()
 
-        cancel_requested = repository.get_job_control(
+        control = repository.get_job_control(
             job_id,
             worker_id,
         )
-        if cancel_requested is None:
+        if control is None:
             lease_lost.set()
             raise JobLeaseLost()
-        if cancel_requested:
+        if control["cancel_requested"]:
             raise ResearchCancelled()
+        if control["pause_requested"]:
+            raise ResearchPaused()
         if shutdown_event.is_set():
             raise WorkerStopping()
 
@@ -113,6 +119,8 @@ def process_job(
             )
     except ResearchCancelled:
         repository.complete_job(job_id, worker_id, "cancelled")
+    except ResearchPaused:
+        repository.pause_running_job(job_id, worker_id)
     except WorkerStopping:
         repository.release_job_for_recovery(job_id, worker_id)
     except JobLeaseLost:

@@ -30,6 +30,8 @@ from app.database.repository import (
     create_session_with_job,
     enqueue_retry_job,
     enqueue_review_job,
+    pause_latest_job,
+    resume_paused_job,
 )
 from app.services.research_service import (
     get_pending_review,
@@ -443,6 +445,85 @@ def cancel_research(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not cancel the research session.",
+        ) from exc
+
+
+@router.post(
+    "/research/{session_id}/pause",
+    response_model=ReviewSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def pause_research(
+    session_id: UUID,
+) -> ReviewSubmissionResponse:
+    """Pause immediately if queued, otherwise at the next graph checkpoint."""
+
+    try:
+        job = pause_latest_job(session_id)
+        is_paused = job["status"] == "paused"
+        return ReviewSubmissionResponse(
+            session_id=str(session_id),
+            status="paused" if is_paused else "running",
+            message=(
+                "Research paused."
+                if is_paused
+                else "Pause requested; research will pause at the next workflow checkpoint."
+            ),
+            job_id=job["id"],
+            job_status=job["status"],
+            attempt_count=job["attempt_count"],
+            max_attempts=job["max_attempts"],
+            cancel_requested=job["cancel_requested"],
+            pause_requested=job["pause_requested"],
+            last_error=job["last_error"],
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to pause research session %s.", session_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not pause the research session.",
+        ) from exc
+
+
+@router.post(
+    "/research/{session_id}/resume",
+    response_model=ReviewSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def resume_research(
+    session_id: UUID,
+) -> ReviewSubmissionResponse:
+    """Queue a paused research job from its latest graph checkpoint."""
+
+    try:
+        job = resume_paused_job(session_id)
+        return ReviewSubmissionResponse(
+            session_id=str(session_id),
+            status="running",
+            message="Research resumed from its latest workflow checkpoint.",
+            job_id=job["id"],
+            job_status=job["status"],
+            attempt_count=job["attempt_count"],
+            max_attempts=job["max_attempts"],
+            cancel_requested=job["cancel_requested"],
+            pause_requested=job["pause_requested"],
+            last_error=job["last_error"],
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to resume research session %s.", session_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not resume the research session.",
         ) from exc
 
 

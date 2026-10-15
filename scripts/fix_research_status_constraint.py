@@ -27,7 +27,8 @@ def main():
                         'waiting_for_review',
                         'completed',
                         'failed',
-                        'cancelled'
+                        'cancelled',
+                        'paused'
                     )
                 );
             """)

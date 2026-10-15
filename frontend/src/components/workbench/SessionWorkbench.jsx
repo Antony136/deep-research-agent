@@ -16,6 +16,8 @@ import {
   Check,
   Radio,
   StopCircle,
+  Pause,
+  Play,
 } from 'lucide-react';
 import { StatusBadge } from '../common/Badge';
 import { Button } from '../common/Button';
@@ -44,6 +46,8 @@ export function SessionWorkbench({
   const [refreshing, setRefreshing] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [activeTab, setActiveTab] = useState('report');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [copiedId, setCopiedId] = useState(false);
@@ -142,6 +146,32 @@ export function SessionWorkbench({
     }
   };
 
+  const handlePause = async () => {
+    setPausing(true);
+    try {
+      const result = await api.pauseSession(sessionId);
+      toast.success(result.message || 'Pause requested');
+      await loadSessionData(true);
+    } catch (err) {
+      toast.error(err.message || 'Pause failed');
+    } finally {
+      setPausing(false);
+    }
+  };
+
+  const handleResume = async () => {
+    setResuming(true);
+    try {
+      const result = await api.resumeSession(sessionId);
+      toast.success(result.message || 'Research resumed');
+      await loadSessionData(true);
+    } catch (err) {
+      toast.error(err.message || 'Resume failed');
+    } finally {
+      setResuming(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (!window.confirm('Delete this research session and all its stored results?')) {
       return;
@@ -188,6 +218,8 @@ export function SessionWorkbench({
   const currentQIndex = researchState.current_question_index || 0;
   const canResumeLegacySession =
     session.status === 'running' && !session.job;
+  const activeJob = ['queued', 'running', 'retry_wait'].includes(session.job?.status);
+  const canCancelJob = ['queued', 'running', 'retry_wait', 'awaiting_review', 'paused'].includes(session.job?.status);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12">
@@ -202,7 +234,7 @@ export function SessionWorkbench({
           <span>Back to All Sessions</span>
         </button>
 
-        <div className="flex items-center gap-2 self-end sm:self-auto">
+        <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto">
           {/* Auto-refresh toggle */}
           {(['created', 'running', 'waiting_for_review'].includes(session.status)) && (
             <button
@@ -231,17 +263,44 @@ export function SessionWorkbench({
             Refresh
           </Button>
 
-          {['queued', 'running', 'retry_wait', 'awaiting_review'].includes(session.job?.status) && (
+          {activeJob && (
+            <Button
+              size="sm"
+              variant="outline"
+              icon={Pause}
+              isLoading={pausing}
+              disabled={session.job?.pause_requested || session.job?.cancel_requested}
+              onClick={handlePause}
+              title="Pause at the next workflow checkpoint"
+            >
+              {session.job?.pause_requested ? 'Pausing…' : 'Pause'}
+            </Button>
+          )}
+
+          {session.job?.status === 'paused' && (
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={Play}
+              isLoading={resuming}
+              onClick={handleResume}
+              title="Resume from the saved workflow checkpoint"
+            >
+              Resume
+            </Button>
+          )}
+
+          {canCancelJob && (
             <Button
               size="sm"
               variant="danger"
               icon={StopCircle}
               isLoading={cancelling}
-              disabled={session.job?.cancel_requested}
+              disabled={session.job?.cancel_requested && session.job?.status === 'running'}
               onClick={handleCancel}
               title="Cancel this research job"
             >
-              {session.job?.cancel_requested ? 'Cancel Requested' : 'Cancel'}
+              {session.job?.cancel_requested && session.job?.status === 'running' ? 'Cancelling…' : 'Cancel'}
             </Button>
           )}
 
@@ -310,13 +369,23 @@ export function SessionWorkbench({
               <span className="text-slate-500 dark:text-slate-400">
                 Attempt {session.job.attempt_count}/{session.job.max_attempts}
               </span>
-              {session.job.cancel_requested && (
+              {session.job.cancel_requested && session.job.status === 'running' && (
                 <span className="text-amber-700 dark:text-amber-300">
-                  Cancellation will take effect at the next workflow checkpoint.
+                  Cancellation will take effect after the current workflow node.
+                </span>
+              )}
+              {session.job.pause_requested && session.job.status === 'running' && (
+                <span className="text-violet-700 dark:text-violet-300">
+                  Pause requested; research will stop after the current workflow node.
+                </span>
+              )}
+              {session.job.status === 'paused' && (
+                <span className="text-violet-700 dark:text-violet-300">
+                  Paused at a workflow checkpoint. Resume when you are ready.
                 </span>
               )}
             </div>
-            {session.job.last_error && (
+            {session.job.last_error && session.job.status !== 'cancelled' && !session.job.cancel_requested && (
               <p className="mt-2 break-words text-xs text-rose-700 dark:text-rose-300">
                 Latest job error: {session.job.last_error}
               </p>
