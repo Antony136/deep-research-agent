@@ -415,9 +415,10 @@ def validate_review_decision(
         if (
             not isinstance(question_number, int)
             or isinstance(question_number, bool)
+            or question_number < 1
         ):
             raise ValueError(
-                "question_number is required for revision."
+                "question_number must be a positive integer."
             )
 
         if (
