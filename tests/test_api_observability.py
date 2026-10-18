@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import pytest
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -141,3 +142,67 @@ def test_instrumented_node_persists_started_and_completed_events(
     ]
     assert all(event["session_id"] == session_id for event in events)
     assert all(event["node_name"] == "researcher" for event in events)
+
+
+def test_instrumented_node_records_success_metrics(monkeypatch):
+    tracing.reset_run_metrics()
+
+    logger = logging.getLogger("deep_research_agent")
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+
+    node = tracing.instrument_node(
+        "researcher_metrics_test",
+        lambda state: {**state, "completed": True},
+    )
+
+    try:
+        result = node({"started": True})
+    finally:
+        logger.setLevel(previous_level)
+
+    metrics = tracing.get_run_metrics()["nodes"][
+        "researcher_metrics_test"
+    ]
+
+    assert result == {"started": True, "completed": True}
+    assert metrics["calls"] == 1
+    assert metrics["successes"] == 1
+    assert metrics["failures"] == 0
+    assert metrics["last_status"] == "success"
+    assert metrics["duration_ms"] >= 0
+
+
+def test_instrumented_node_records_failure_metrics(monkeypatch):
+    tracing.reset_run_metrics()
+
+    logger = logging.getLogger("deep_research_agent")
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+
+    def failing_node(state):
+        raise RuntimeError("Simulated researcher failure")
+
+    node = tracing.instrument_node(
+        "researcher_failure_test",
+        failing_node,
+    )
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="Simulated researcher failure",
+        ):
+            node({})
+    finally:
+        logger.setLevel(previous_level)
+
+    metrics = tracing.get_run_metrics()["nodes"][
+        "researcher_failure_test"
+    ]
+
+    assert metrics["calls"] == 1
+    assert metrics["successes"] == 0
+    assert metrics["failures"] == 1
+    assert metrics["last_status"] == "failure"
+    assert metrics["duration_ms"] >= 0

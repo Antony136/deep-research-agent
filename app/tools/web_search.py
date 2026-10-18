@@ -100,10 +100,19 @@ def search_web(
                 print(f"    Search attempt {attempt + 1}/{max_retries + 1}")
 
                 # Use the persistent context instance 'ddgs' instead of instantiating a new one
+                provider_started = time.perf_counter()
+
                 raw_results = ddgs.text(
                     query=query,
                     max_results=max_results,
                     backend="auto",
+                )
+
+                provider_elapsed = time.perf_counter() - provider_started
+
+                print(
+                    f"    Provider call completed in "
+                    f"{provider_elapsed:.2f}s"
                 )
 
                 if not raw_results:

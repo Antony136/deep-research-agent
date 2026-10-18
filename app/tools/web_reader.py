@@ -1,26 +1,24 @@
 """
 Web page reader for the Deep Research Agent.
 
-This module safely downloads public web pages and extracts
-their readable text for downstream research and evidence
-extraction.
+Safely downloads public web pages and extracts readable text.
 
-The reader is intentionally focused on:
-- URL validation
-- basic SSRF protection
-- controlled redirects
-- request timeouts
-- response-size limits
-- HTML/text content validation
-- readable text extraction
-- graceful failure handling
+Supports optional HTTP client reuse to reduce connection setup
+overhead when reading multiple pages.
 
-It does not attempt to render JavaScript-heavy pages or
-bypass CAPTCHA, authentication, paywalls, or anti-bot systems.
+Temporary performance diagnostics measure:
+- URL validation, including DNS resolution
+- HTTP request duration
+- Response-body reading
+- HTML text extraction
+
+The reader retains its existing security controls and limits.
 """
 
 import ipaddress
 import socket
+import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
@@ -33,18 +31,9 @@ from bs4 import BeautifulSoup
 # ----------------------------------------------------------
 
 DEFAULT_TIMEOUT = 15.0
-
 MAX_REDIRECTS = 5
-
-# Maximum amount of response data we are willing to read.
-# This prevents unexpectedly large pages from consuming
-# excessive memory.
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MB
-
-# Maximum amount of extracted text that will be stored in
-# the Source object and eventually passed toward the LLM.
 MAX_CONTENT_CHARS = 50_000
-
 
 USER_AGENT = (
     "Mozilla/5.0 "
@@ -54,12 +43,7 @@ USER_AGENT = (
     "Chrome/154.0 Safari/537.36"
 )
 
-
-ALLOWED_SCHEMES = {
-    "http",
-    "https",
-}
-
+ALLOWED_SCHEMES = {"http", "https"}
 
 ALLOWED_CONTENT_TYPES = {
     "text/html",
@@ -70,9 +54,7 @@ ALLOWED_CONTENT_TYPES = {
 
 @dataclass
 class WebPage:
-    """
-    A successfully fetched web page.
-    """
+    """A successfully fetched web page."""
 
     url: str
     title: str
@@ -80,39 +62,36 @@ class WebPage:
 
 
 # ----------------------------------------------------------
+# Timing diagnostics
+# ----------------------------------------------------------
+
+def _log_timing(stage: str, started: float) -> None:
+    """Print the elapsed time for a reader stage."""
+
+    elapsed = time.perf_counter() - started
+    print(f"    [Reader Timing] {stage}: {elapsed:.3f}s")
+
+
+# ----------------------------------------------------------
 # URL validation
 # ----------------------------------------------------------
 
-
-def _is_private_or_reserved_host(
-    hostname: str,
-) -> bool:
+def _is_private_or_reserved_host(hostname: str) -> bool:
     """
-    Check whether a hostname resolves to a private,
-    loopback, link-local, reserved, or otherwise non-public
-    IP address.
-
-    This provides basic SSRF protection.
+    Check whether a hostname resolves to private, loopback,
+    link-local, reserved, or otherwise non-public IP addresses.
     """
 
     try:
-        addresses = socket.getaddrinfo(
-            hostname,
-            None,
-        )
-
+        addresses = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
         return True
 
     for address in addresses:
-
         ip_string = address[4][0]
 
         try:
-            ip = ipaddress.ip_address(
-                ip_string
-            )
-
+            ip = ipaddress.ip_address(ip_string)
         except ValueError:
             return True
 
@@ -122,18 +101,11 @@ def _is_private_or_reserved_host(
     return False
 
 
-def _validate_url(
-    url: str,
-) -> tuple[bool, str]:
+def _validate_url(url: str) -> tuple[bool, str]:
     """
     Validate a URL before making a network request.
 
-    Returns
-    -------
-    tuple[bool, str]
-        (True, "") when valid.
-
-        (False, reason) when rejected.
+    Returns (True, "") when valid, otherwise (False, reason).
     """
 
     if not url.strip():
@@ -141,35 +113,16 @@ def _validate_url(
 
     try:
         parsed = urlparse(url)
-
     except ValueError:
         return False, "URL could not be parsed."
 
-    # ------------------------------------------------------
-    # Scheme
-    # ------------------------------------------------------
-
     if parsed.scheme.lower() not in ALLOWED_SCHEMES:
-        return False, (
-            "Only HTTP and HTTPS URLs are allowed."
-        )
-
-    # ------------------------------------------------------
-    # Host
-    # ------------------------------------------------------
+        return False, "Only HTTP and HTTPS URLs are allowed."
 
     hostname = parsed.hostname
 
     if not hostname:
         return False, "URL does not contain a hostname."
-
-    # ------------------------------------------------------
-    # Reject URLs containing credentials.
-    #
-    # Example:
-    #
-    # https://username:password@example.com
-    # ------------------------------------------------------
 
     if parsed.username or parsed.password:
         return False, (
@@ -177,54 +130,29 @@ def _validate_url(
             "credentials are not allowed."
         )
 
-    # ------------------------------------------------------
-    # Restrict ports to normal web ports.
-    # ------------------------------------------------------
-
     try:
         port = parsed.port
-
     except ValueError:
         return False, "URL contains an invalid port."
 
-    if port is not None and port not in {
-        80,
-        443,
-    }:
+    if port is not None and port not in {80, 443}:
         return False, (
-            "Only standard HTTP and HTTPS ports "
-            "are allowed."
+            "Only standard HTTP and HTTPS ports are allowed."
         )
-
-    # ------------------------------------------------------
-    # Direct IP address check.
-    # ------------------------------------------------------
 
     try:
-        ip = ipaddress.ip_address(
-            hostname
-        )
+        ip = ipaddress.ip_address(hostname)
 
         if not ip.is_global:
             return False, (
-                "Private or non-public IP addresses "
-                "are not allowed."
+                "Private or non-public IP addresses are not allowed."
             )
-
     except ValueError:
-        # Hostname is a normal domain.
+        # The hostname is a domain rather than an IP literal.
         pass
 
-    # ------------------------------------------------------
-    # DNS resolution check.
-    #
-    # This catches domains that resolve to localhost,
-    # private networks, loopback addresses, etc.
-    # ------------------------------------------------------
-
-    if _is_private_or_reserved_host(
-        hostname
-    ):
+    # Validate DNS resolution before making the request.
+    if _is_private_or_reserved_host(hostname):
         return False, (
             "Hostname resolves to a private or "
             "non-public network address."
@@ -237,21 +165,10 @@ def _validate_url(
 # Response validation
 # ----------------------------------------------------------
 
+def _is_allowed_content_type(content_type: str) -> bool:
+    """Reject binary downloads and unsupported response types."""
 
-def _is_allowed_content_type(
-    content_type: str,
-) -> bool:
-    """
-    Check whether the response is a readable web/text
-    document rather than a binary download.
-    """
-
-    media_type = (
-        content_type
-        .split(";")[0]
-        .strip()
-        .lower()
-    )
+    media_type = content_type.split(";")[0].strip().lower()
 
     return media_type in ALLOWED_CONTENT_TYPES
 
@@ -260,28 +177,10 @@ def _is_allowed_content_type(
 # Text extraction
 # ----------------------------------------------------------
 
+def _extract_text(html: str) -> tuple[str, str]:
+    """Extract the page title and readable text."""
 
-def _extract_text(
-    html: str,
-) -> tuple[str, str]:
-    """
-    Extract title and readable text from HTML.
-
-    Returns
-    -------
-    tuple[str, str]
-        title, content
-    """
-
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
-    )
-
-    # ------------------------------------------------------
-    # Remove elements that normally do not contain useful
-    # research content.
-    # ------------------------------------------------------
+    soup = BeautifulSoup(html, "html.parser")
 
     for element in soup(
         [
@@ -299,42 +198,22 @@ def _extract_text(
     title = ""
 
     if soup.title:
-        title = soup.title.get_text(
-            " ",
-            strip=True,
-        )
+        title = soup.title.get_text(" ", strip=True)
 
-    # ------------------------------------------------------
-    # Prefer obvious article/main content when available.
-    #
-    # If the page does not have these elements, fall back
-    # to the complete remaining document text.
-    # ------------------------------------------------------
-
-    main_content = soup.find(
-        [
-            "article",
-            "main",
-        ]
-    )
+    main_content = soup.find(["article", "main"])
 
     if main_content is not None:
-
         content = main_content.get_text(
             separator=" ",
             strip=True,
         )
-
     else:
-
         content = soup.get_text(
             separator=" ",
             strip=True,
         )
 
-    content = " ".join(
-        content.split()
-    )
+    content = " ".join(content.split())
 
     return title, content
 
@@ -343,53 +222,34 @@ def _extract_text(
 # Main reader
 # ----------------------------------------------------------
 
-
 def read_webpage(
     url: str,
     timeout: float = DEFAULT_TIMEOUT,
+    client: httpx.Client | None = None,
 ) -> WebPage | None:
     """
     Safely download a web page and extract readable text.
 
-    Parameters
-    ----------
-    url:
-        URL of the page to read.
+    Args:
+        url: URL to fetch.
+        timeout: Timeout used when creating an internal client.
+        client: Optional reusable HTTP client. When supplied,
+            this function does not close the caller's client.
 
-    timeout:
-        Maximum time allowed for each HTTP request.
+    Redirects are followed manually so every destination can
+    be validated before another request is made.
 
-    Returns
-    -------
-    WebPage | None
-        Extracted page content, or None if the page could
-        not be safely or successfully read.
-
-    Notes
-    -----
-    Redirects are followed manually so that every redirect
-    destination can be validated before another request is
-    made.
+    Existing calls to read_webpage(url) remain supported.
     """
 
-    # ------------------------------------------------------
     # 1. Validate the initial URL.
-    # ------------------------------------------------------
-
-    valid, reason = _validate_url(
-        url
-    )
+    validation_started = time.perf_counter()
+    valid, reason = _validate_url(url)
+    _log_timing("Initial URL validation", validation_started)
 
     if not valid:
-
-        print(
-            f"    Rejected URL: {url}"
-        )
-
-        print(
-            f"    Reason: {reason}"
-        )
-
+        print(f"    Rejected URL: {url}")
+        print(f"    Reason: {reason}")
         return None
 
     current_url = url
@@ -403,291 +263,165 @@ def read_webpage(
         ),
     }
 
-    try:
-
-        with httpx.Client(
+    # Create a client only when the caller did not supply one.
+    # nullcontext ensures a shared client is not closed here.
+    client_context = (
+        httpx.Client(
             headers=headers,
             timeout=timeout,
             follow_redirects=False,
-        ) as client:
+        )
+        if client is None
+        else nullcontext(client)
+    )
 
-            # --------------------------------------------------
+    try:
+        with client_context as active_client:
+
             # 2. Follow redirects manually.
-            # --------------------------------------------------
+            for redirect_number in range(MAX_REDIRECTS + 1):
 
-            for redirect_number in range(
-                MAX_REDIRECTS + 1
-            ):
+                validation_started = time.perf_counter()
+                valid, reason = _validate_url(current_url)
 
-                # Validate every URL before requesting it.
-                valid, reason = _validate_url(
-                    current_url
+                _log_timing(
+                    f"URL validation (request {redirect_number + 1})",
+                    validation_started,
                 )
 
                 if not valid:
-
-                    print(
-                        f"    Rejected redirect: "
-                        f"{current_url}"
-                    )
-
-                    print(
-                        f"    Reason: {reason}"
-                    )
-
+                    print(f"    Rejected redirect: {current_url}")
+                    print(f"    Reason: {reason}")
                     return None
 
-                response = client.get(
-                    current_url
-                )
-
-                # --------------------------------------------------
-                # Redirect
-                # --------------------------------------------------
+                request_started = time.perf_counter()
+                response = active_client.get(current_url)
+                _log_timing("HTTP request", request_started)
 
                 if response.is_redirect:
-
                     if redirect_number >= MAX_REDIRECTS:
-
-                        print(
-                            f"    Too many redirects: "
-                            f"{url}"
-                        )
-
+                        print(f"    Too many redirects: {url}")
                         return None
 
-                    location = response.headers.get(
-                        "location"
-                    )
+                    location = response.headers.get("location")
 
                     if not location:
-
                         print(
                             "    Redirect response "
                             "did not contain a location."
                         )
-
                         return None
 
-                    current_url = urljoin(
-                        current_url,
-                        location,
-                    )
-
+                    current_url = urljoin(current_url, location)
                     continue
 
-                # --------------------------------------------------
-                # We have reached the final response.
-                # --------------------------------------------------
-
                 response.raise_for_status()
-
                 break
 
             else:
-
                 return None
 
     except httpx.TimeoutException as exc:
-
-        print(
-            f"    Page request timed out: {url}"
-        )
-
-        print(
-            f"    Error: {exc}"
-        )
-
+        print(f"    Page request timed out: {url}")
+        print(f"    Error: {exc}")
         return None
 
     except httpx.HTTPStatusError as exc:
-
-        print(
-            f"    HTTP error while reading: {url}"
-        )
-
-        print(
-            f"    Status: {exc.response.status_code}"
-        )
-
+        print(f"    HTTP error while reading: {url}")
+        print(f"    Status: {exc.response.status_code}")
         return None
 
     except httpx.HTTPError as exc:
-
-        print(
-            f"    Failed to read page: {url}"
-        )
-
-        print(
-            f"    Error: {exc}"
-        )
-
+        print(f"    Failed to read page: {url}")
+        print(f"    Error: {exc}")
         return None
 
     except Exception as exc:
-
-        print(
-            f"    Unexpected reader error: {url}"
-        )
-
-        print(
-            f"    Error: {exc}"
-        )
-
+        print(f"    Unexpected reader error: {url}")
+        print(f"    Error: {exc}")
         return None
 
-    # ------------------------------------------------------
     # 3. Validate response content type.
-    # ------------------------------------------------------
+    content_type = response.headers.get("content-type", "")
 
-    content_type = response.headers.get(
-        "content-type",
-        "",
-    )
-
-    if not _is_allowed_content_type(
-        content_type
-    ):
-
-        print(
-            f"    Unsupported content type: "
-            f"{content_type}"
-        )
-
+    if not _is_allowed_content_type(content_type):
+        print(f"    Unsupported content type: {content_type}")
         return None
 
-    # ------------------------------------------------------
     # 4. Check Content-Length when provided.
-    # ------------------------------------------------------
-
-    content_length = response.headers.get(
-        "content-length"
-    )
+    content_length = response.headers.get("content-length")
 
     if content_length:
-
         try:
-            declared_size = int(
-                content_length
-            )
-
+            declared_size = int(content_length)
         except ValueError:
-
             declared_size = None
 
         if (
             declared_size is not None
             and declared_size > MAX_RESPONSE_BYTES
         ):
-
-            print(
-                "    Response is too large."
-            )
-
+            print("    Response is too large.")
             return None
 
-    # ------------------------------------------------------
     # 5. Read the response with a hard size limit.
-    #
-    # We do not blindly accept an arbitrarily large body.
-    # ------------------------------------------------------
-
     body = bytearray()
+    body_started = time.perf_counter()
 
     try:
-
-        for chunk in response.iter_bytes(
-            chunk_size=64 * 1024
-        ):
-
+        for chunk in response.iter_bytes(chunk_size=64 * 1024):
             body.extend(chunk)
 
             if len(body) > MAX_RESPONSE_BYTES:
-
+                _log_timing("Response body reading", body_started)
                 print(
                     "    Response exceeded the "
                     "maximum allowed size."
                 )
-
                 return None
 
     except httpx.HTTPError as exc:
-
-        print(
-            f"    Failed while reading response: "
-            f"{current_url}"
-        )
-
-        print(
-            f"    Error: {exc}"
-        )
-
+        _log_timing("Response body reading", body_started)
+        print(f"    Failed while reading response: {current_url}")
+        print(f"    Error: {exc}")
         return None
 
-    # ------------------------------------------------------
-    # 6. Decode the response.
-    # ------------------------------------------------------
+    _log_timing("Response body reading", body_started)
 
+    # 6. Decode the response.
     encoding = response.encoding or "utf-8"
 
     try:
-
         html = bytes(body).decode(
             encoding,
             errors="replace",
         )
-
     except (LookupError, UnicodeError):
-
         html = bytes(body).decode(
             "utf-8",
             errors="replace",
         )
 
     if not html.strip():
-
-        print(
-            f"    Page returned empty content: "
-            f"{current_url}"
-        )
-
+        print(f"    Page returned empty content: {current_url}")
         return None
 
-    # ------------------------------------------------------
     # 7. Extract readable text.
-    # ------------------------------------------------------
-
-    title, content = _extract_text(
-        html
-    )
+    extraction_started = time.perf_counter()
+    title, content = _extract_text(html)
+    _log_timing("HTML text extraction", extraction_started)
 
     if not content:
-
-        print(
-            f"    No readable content found: "
-            f"{current_url}"
-        )
-
+        print(f"    No readable content found: {current_url}")
         return None
 
-    # ------------------------------------------------------
-    # 8. Limit content passed further into the system.
-    #
-    # This protects the LLM context from extremely large
-    # webpages.
-    # ------------------------------------------------------
-
+    # 8. Limit content passed toward the LLM.
     if len(content) > MAX_CONTENT_CHARS:
-
         print(
-            f"    Content truncated from "
-            f"{len(content):,} to "
+            f"    Content truncated from {len(content):,} to "
             f"{MAX_CONTENT_CHARS:,} characters."
         )
-
-        content = content[
-            :MAX_CONTENT_CHARS
-        ]
+        content = content[:MAX_CONTENT_CHARS]
 
     return WebPage(
         url=str(response.url),
