@@ -80,7 +80,7 @@ def create_research(
 
     if not question:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Research question cannot be empty.",
         )
 
